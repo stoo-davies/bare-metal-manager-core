@@ -18,6 +18,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
+use tracing::info;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheMode {
@@ -55,6 +56,14 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn from_env() -> Result<Self, String> {
+        if env::var("IMAGECACHE_MODE").is_err() {
+            info!(
+                "IMAGECACHE_MODE not set - default to sleep forever for unconfigured environments."
+            );
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1000000));
+            }
+        }
         let poll_secs: u64 = env::var("IMAGECACHE_POLL_INTERVAL_SECS")
             .unwrap_or_else(|_| "3600".to_string())
             .parse()
