@@ -30,6 +30,10 @@ path = "src/main.rs"
 name = "carbide-imagecache-clear-urls"
 path = "src/clear_urls.rs"
 
+[[bin]]
+name = "carbide-imagecache-create-os"
+path = "src/create_os.rs"
+
 [dependencies]
 # [begin-local-dependencies]
 carbide-rpc = { path = "../rpc" }
@@ -40,9 +44,13 @@ carbide-version = { path = "../version" }
 
 axum = { workspace = true }
 clap = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
 hex = { workspace = true }
+ratatui = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 rust-s3 = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

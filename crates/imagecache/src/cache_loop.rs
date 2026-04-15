@@ -200,9 +200,19 @@ async fn process_artifact<S: StorageBackend>(
         && !sha.is_empty()
     {
         let key = s3_key_for_artifact(sha, &art.url);
-        if ctx.storage.object_exists(&key).await.unwrap_or(false)
-            || ctx.uploaded_this_cycle.contains(&key)
-        {
+        let exists = match ctx.storage.object_exists(&key).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                warn!(
+                    os = os_name,
+                    artifact = art.name,
+                    error = %e,
+                    "Failed to check if artifact exists in storage, will re-download"
+                );
+                false
+            }
+        };
+        if exists || ctx.uploaded_this_cycle.contains(&key) {
             let cached_url = format!("{}/{key}", ctx.config.url_base);
             info!(
                 os = os_name,

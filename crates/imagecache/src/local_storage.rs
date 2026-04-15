@@ -28,11 +28,26 @@ impl LocalStorage {
     pub fn new(cache_dir: PathBuf) -> Self {
         Self { cache_dir }
     }
+
+    /// Resolve `key` within `cache_dir`, rejecting paths that escape via `..` or
+    /// absolute components.
+    fn safe_path(&self, key: &str) -> Result<PathBuf, ImageCacheError> {
+        let path = self.cache_dir.join(key);
+        // Canonicalize isn't usable here because the file may not exist yet.
+        // Instead, check that no component is ".." and the key isn't absolute.
+        if Path::new(key).is_absolute() || key.split(['/', '\\']).any(|c| c == "..") {
+            return Err(ImageCacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("storage key contains path traversal: {key}"),
+            )));
+        }
+        Ok(path)
+    }
 }
 
 impl StorageBackend for LocalStorage {
     async fn object_exists(&self, key: &str) -> Result<bool, ImageCacheError> {
-        let path = self.cache_dir.join(key);
+        let path = self.safe_path(key)?;
         Ok(tokio::fs::try_exists(&path).await?)
     }
 
@@ -41,7 +56,7 @@ impl StorageBackend for LocalStorage {
         key: &str,
         file_path: &Path,
     ) -> Result<(), ImageCacheError> {
-        let dest = self.cache_dir.join(key);
+        let dest = self.safe_path(key)?;
         // Rename is atomic and O(1) when source and dest share a filesystem,
         // which is the common path (download temp_dir defaults to cache_dir).
         match tokio::fs::rename(file_path, &dest).await {
@@ -50,8 +65,14 @@ impl StorageBackend for LocalStorage {
                 // Cross-filesystem: fall back to copy-then-rename for atomicity.
                 let temp_dest = self.cache_dir.join(format!(".{key}.tmp"));
                 tokio::fs::copy(file_path, &temp_dest).await?;
-                tokio::fs::rename(&temp_dest, &dest).await?;
-                Ok(())
+                match tokio::fs::rename(&temp_dest, &dest).await {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        // Clean up orphaned temp file on rename failure
+                        let _ = tokio::fs::remove_file(&temp_dest).await;
+                        Err(ImageCacheError::Io(e))
+                    }
+                }
             }
             Err(e) => Err(ImageCacheError::Io(e)),
         }
