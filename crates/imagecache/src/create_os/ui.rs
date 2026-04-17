@@ -23,8 +23,7 @@ use ratatui::widgets::{Block, Borders, List, Paragraph, Wrap};
 
 use super::app::{App, AuthType, FileStatus, Phase, ShaStatus, SubmitResult};
 use super::form::{self, FieldLocation, FieldType};
-use super::review;
-use super::template_select;
+use super::{review, template_select};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     match &app.phase {
@@ -513,7 +512,7 @@ fn build_form_help(app: &App) -> Line<'static> {
 
 // --- Phase 3: Review ---
 
-fn draw_review(frame: &mut Frame, app: &App) {
+fn draw_review(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -534,6 +533,13 @@ fn draw_review(frame: &mut Frame, app: &App) {
 
     // JSON preview
     let json = review::build_review_json(app);
+    let line_count = json.lines().count();
+    let inner_height = chunks[1].height.saturating_sub(2) as usize; // border top + bottom
+    app.review_scroll_max = line_count.saturating_sub(inner_height);
+    // Clamp scroll in case terminal was resized
+    if app.review_scroll > app.review_scroll_max {
+        app.review_scroll = app.review_scroll_max;
+    }
     let json_widget = Paragraph::new(json)
         .block(
             Block::default()

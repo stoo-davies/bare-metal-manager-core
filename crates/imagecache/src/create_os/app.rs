@@ -260,6 +260,8 @@ pub struct App {
 
     // Phase 3 state
     pub review_scroll: usize,
+    /// Maximum useful scroll offset for the review pane, set during draw.
+    pub review_scroll_max: usize,
 
     // Shared
     pub status_message: Option<String>,
@@ -303,6 +305,7 @@ impl App {
             focused_field: 0,
             scroll_offset: 0,
             review_scroll: 0,
+            review_scroll_max: 0,
             status_message: None,
             should_quit: false,
             quit_confirm: false,
@@ -383,6 +386,20 @@ impl App {
         for a in &self.form.required_artifacts {
             if a.url.is_empty() {
                 errors.push(format!("Artifact '{}' URL is required", a.name));
+            }
+        }
+        for a in self
+            .form
+            .required_artifacts
+            .iter()
+            .chain(self.form.optional_artifacts.iter())
+        {
+            if a.auth_type != AuthType::None && a.auth_token.is_empty() {
+                errors.push(format!(
+                    "Artifact '{}' has auth type {} but no token",
+                    a.name,
+                    a.auth_type.as_str()
+                ));
             }
         }
         errors

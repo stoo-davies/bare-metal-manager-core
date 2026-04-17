@@ -34,6 +34,10 @@ path = "src/clear_urls.rs"
 name = "carbide-imagecache-create-os"
 path = "src/create_os.rs"
 
+[[bin]]
+name = "carbide-imagecache-list-os"
+path = "src/list_os.rs"
+
 [dependencies]
 # [begin-local-dependencies]
 carbide-rpc = { path = "../rpc" }

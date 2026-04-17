@@ -44,10 +44,10 @@ mod template_select;
 #[path = "create_os/ui.rs"]
 mod ui;
 
-use std::env;
-use std::io;
 use std::time::Duration;
+use std::{env, io};
 
+use app::App;
 use crossterm::ExecutableCommand;
 use crossterm::event::{Event, EventStream};
 use crossterm::terminal::{
@@ -58,8 +58,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rpc::forge_api_client::ForgeApiClient;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
-
-use app::App;
 
 fn env_required(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))

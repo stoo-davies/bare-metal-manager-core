@@ -263,7 +263,19 @@ async fn process_artifact<S: StorageBackend>(
     // Store using the SHA256 (plus original file extension) as the key
     let key = s3_key_for_artifact(&result.sha256, &art.url);
 
-    if !ctx.storage.object_exists(&key).await.unwrap_or(false) {
+    let already_stored = match ctx.storage.object_exists(&key).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            warn!(
+                os = os_name,
+                artifact = art.name,
+                error = %e,
+                "Failed to check if artifact exists after download, will upload"
+            );
+            false
+        }
+    };
+    if !already_stored {
         info!(
             os = os_name,
             artifact = art.name,

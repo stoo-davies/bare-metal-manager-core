@@ -21,9 +21,8 @@ use tokio::sync::mpsc;
 use super::app::{
     App, ArtifactField, AuthType, FileStatus, ParamField, Phase, ShaStatus, SubmitResult,
 };
-use super::download_hash;
 use super::form::{self, FieldLocation, FieldType};
-use super::template_select;
+use super::{download_hash, template_select};
 
 /// Result from background operations.
 pub enum BackgroundResult {
@@ -316,20 +315,9 @@ fn handle_auth_type_field(app: &mut App, key: KeyEvent, location: &FieldLocation
 
     if toggled {
         let new_has_token = artifact.auth_type != AuthType::None;
-        // Adjust focused_field for all fields after this artifact's auth_type
-        // to account for the auth_token field appearing/disappearing.
-        if !old_has_token && new_has_token {
-            // auth_token field inserted — push subsequent focus indices forward
-            // Fields after the current one (auth_type at sub_field 2) shift by +1
-            // Only affects fields after this artifact's auth_type position.
-            // Since we're ON the auth_type field, no adjustment needed for current
-            // focus, but total_field_count changed, so wrapping works correctly.
-        } else if old_has_token && !new_has_token {
-            // auth_token field removed — pull subsequent focus indices back
-            // If focus was on auth_token (sub_field 3) or beyond within this
-            // artifact, it would now point to the wrong field. But we're on
-            // auth_type (sub_field 2), so focus is fine. However, if a different
-            // code path had set focus beyond this point, we need to clamp.
+        if old_has_token != new_has_token {
+            // The auth_token field was inserted or removed, changing
+            // total_field_count. Clamp focused_field to stay valid.
             let total = app.total_field_count();
             if app.focused_field >= total {
                 app.focused_field = total.saturating_sub(1);
@@ -512,8 +500,12 @@ fn handle_remove_optional(app: &mut App) -> bool {
     match location {
         FieldLocation::OptionalParam(i) => {
             app.form.optional_params.remove(i);
-            if app.focused_field > 0 {
-                app.focused_field -= 1;
+            // Clamp focus to valid range after removal
+            let total = app.total_field_count();
+            if total == 0 {
+                app.focused_field = 0;
+            } else if app.focused_field >= total {
+                app.focused_field = total - 1;
             }
             app.status_message = Some("Removed optional parameter".into());
             true
@@ -524,8 +516,13 @@ fn handle_remove_optional(app: &mut App) -> bool {
             ..
         } => {
             app.form.optional_artifacts.remove(artifact_index);
-            if app.focused_field > 0 {
-                app.focused_field -= 1;
+            // Clamp focus to valid range — an artifact has multiple sub-fields,
+            // so simple decrement-by-1 is insufficient.
+            let total = app.total_field_count();
+            if total == 0 {
+                app.focused_field = 0;
+            } else if app.focused_field >= total {
+                app.focused_field = total - 1;
             }
             app.status_message = Some("Removed optional artifact".into());
             true
@@ -555,9 +552,7 @@ fn handle_review(
             true
         }
         KeyCode::Down => {
-            // Cap scroll at the number of lines in the review JSON
-            let line_count = super::review::build_review_json(app).lines().count();
-            if app.review_scroll + 1 < line_count {
+            if app.review_scroll < app.review_scroll_max {
                 app.review_scroll += 1;
             }
             true
