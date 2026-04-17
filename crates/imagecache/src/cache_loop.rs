@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 use crate::api_client::ApiClient;
 use crate::config::RuntimeConfig;
 use crate::error::ImageCacheError;
+use crate::keys::key_from_cached_url;
 use crate::storage::StorageBackend;
 use crate::{artifact, download};
 
@@ -139,7 +140,7 @@ async fn process_artifact<S: StorageBackend>(
     if let Some(cached_url) = &art.cached_url
         && !cached_url.is_empty()
     {
-        let cached_key = cached_url.rsplit('/').next().unwrap_or(cached_url);
+        let cached_key = key_from_cached_url(cached_url);
 
         let sha_matches = match &art.sha {
             Some(sha) if !sha.is_empty() => cached_key == s3_key_for_artifact(sha, &art.url),

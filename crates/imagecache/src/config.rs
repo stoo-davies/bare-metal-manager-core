@@ -52,6 +52,15 @@ pub struct RuntimeConfig {
     pub tenant_filter: Option<String>,
     pub url_base: String,
     pub download_read_timeout: Duration,
+    pub gc: GcConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct GcConfig {
+    pub enabled: bool,
+    pub interval: Duration,
+    pub grace_period: Duration,
+    pub dry_run: bool,
 }
 
 impl RuntimeConfig {
@@ -89,6 +98,26 @@ impl RuntimeConfig {
             .unwrap_or_else(|_| "300".to_string())
             .parse()
             .map_err(|_| "IMAGECACHE_DOWNLOAD_READ_TIMEOUT_SECS is not a valid u64".to_string())?;
+
+        let gc_enabled: bool = env::var("IMAGECACHE_GC_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .map_err(|_| "IMAGECACHE_GC_ENABLED is not a valid bool".to_string())?;
+
+        let gc_interval_secs: u64 = env::var("IMAGECACHE_GC_INTERVAL_SECS")
+            .unwrap_or_else(|_| "86400".to_string())
+            .parse()
+            .map_err(|_| "IMAGECACHE_GC_INTERVAL_SECS is not a valid u64".to_string())?;
+
+        let gc_grace_period_secs: u64 = env::var("IMAGECACHE_GC_GRACE_PERIOD_SECS")
+            .unwrap_or_else(|_| "86400".to_string())
+            .parse()
+            .map_err(|_| "IMAGECACHE_GC_GRACE_PERIOD_SECS is not a valid u64".to_string())?;
+
+        let gc_dry_run: bool = env::var("IMAGECACHE_GC_DRY_RUN")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .map_err(|_| "IMAGECACHE_GC_DRY_RUN is not a valid bool".to_string())?;
 
         let mode = match env::var("IMAGECACHE_MODE")
             .unwrap_or_else(|_| "S3".to_string())
@@ -176,6 +205,12 @@ impl RuntimeConfig {
             tenant_filter,
             url_base,
             download_read_timeout: Duration::from_secs(download_read_timeout_secs),
+            gc: GcConfig {
+                enabled: gc_enabled,
+                interval: Duration::from_secs(gc_interval_secs),
+                grace_period: Duration::from_secs(gc_grace_period_secs),
+                dry_run: gc_dry_run,
+            },
         })
     }
 }

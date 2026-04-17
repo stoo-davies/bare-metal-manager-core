@@ -16,7 +16,9 @@
  */
 
 use std::path::Path;
+use std::time::SystemTime;
 
+use chrono::DateTime;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
 use tokio::io::AsyncReadExt;
@@ -24,7 +26,7 @@ use tracing::warn;
 
 use crate::config::S3Config;
 use crate::error::ImageCacheError;
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StoredObject};
 
 /// 64 MiB multipart chunk size. The rust-s3 default (8 MiB) creates ~1152
 /// concurrent requests for a 9 GiB file, exhausting file descriptors.
@@ -191,4 +193,53 @@ impl StorageBackend for S3Client {
     ) -> Result<(), ImageCacheError> {
         self.put_object_from_file_impl(key, file_path).await
     }
+
+    async fn list_keys(&self) -> Result<Vec<StoredObject>, ImageCacheError> {
+        let pages = self
+            .bucket
+            .list(String::new(), None)
+            .await
+            .map_err(|e| ImageCacheError::S3(format!("ListObjects failed: {e}")))?;
+
+        let mut out = Vec::new();
+        for page in pages {
+            for obj in page.contents {
+                let last_modified = parse_s3_timestamp(&obj.last_modified).unwrap_or_else(|| {
+                    warn!(
+                        key = obj.key,
+                        last_modified = obj.last_modified,
+                        "Could not parse S3 LastModified; treating object as just-modified"
+                    );
+                    SystemTime::now()
+                });
+                out.push(StoredObject {
+                    key: obj.key,
+                    last_modified,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_object(&self, key: &str) -> Result<(), ImageCacheError> {
+        let response = self
+            .bucket
+            .delete_object(key)
+            .await
+            .map_err(|e| ImageCacheError::S3(format!("DELETE failed for key {key}: {e}")))?;
+        let code = response.status_code();
+        // S3 DELETE returns 204 for success, but some implementations return 200.
+        // 404 is idempotent — the object is already gone.
+        if !(200..300).contains(&code) && code != 404 {
+            return Err(ImageCacheError::S3(format!(
+                "DELETE returned status {code} for key {key}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Parses the ISO-8601 timestamp S3 returns in `ListBucketResult.contents[].last_modified`.
+fn parse_s3_timestamp(s: &str) -> Option<SystemTime> {
+    DateTime::parse_from_rfc3339(s).ok().map(SystemTime::from)
 }

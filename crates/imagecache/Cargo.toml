@@ -39,6 +39,7 @@ carbide-version = { path = "../version" }
 # [end-local-dependencies]
 
 axum = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "stream"] }

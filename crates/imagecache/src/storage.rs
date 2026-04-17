@@ -16,8 +16,15 @@
  */
 
 use std::path::Path;
+use std::time::SystemTime;
 
 use crate::error::ImageCacheError;
+
+/// A stored object surfaced by `list_keys`.
+pub struct StoredObject {
+    pub key: String,
+    pub last_modified: SystemTime,
+}
 
 pub trait StorageBackend: Send + Sync {
     fn object_exists(
@@ -29,5 +36,14 @@ pub trait StorageBackend: Send + Sync {
         &self,
         key: &str,
         file_path: &Path,
+    ) -> impl std::future::Future<Output = Result<(), ImageCacheError>> + Send;
+
+    fn list_keys(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<StoredObject>, ImageCacheError>> + Send;
+
+    fn delete_object(
+        &self,
+        key: &str,
     ) -> impl std::future::Future<Output = Result<(), ImageCacheError>> + Send;
 }

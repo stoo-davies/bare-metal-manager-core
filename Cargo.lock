@@ -2038,6 +2038,7 @@ dependencies = [
  "carbide-tls",
  "carbide-uuid",
  "carbide-version",
+ "chrono",
  "clap",
  "hex",
  "reqwest",

@@ -31,11 +31,15 @@ mod config;
 mod download;
 mod error;
 mod file_server;
+mod gc;
+mod keys;
 mod local_storage;
 mod s3;
 mod storage;
 
-use config::CacheMode;
+use api_client::ApiClient;
+use config::{CacheMode, RuntimeConfig};
+use storage::StorageBackend;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -87,6 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         download_read_timeout_secs = runtime_config.download_read_timeout.as_secs(),
         temp_dir = %runtime_config.temp_dir.display(),
         mode = ?runtime_config.mode,
+        gc_enabled = runtime_config.gc.enabled,
+        gc_interval_secs = runtime_config.gc.interval.as_secs(),
+        gc_grace_period_secs = runtime_config.gc.grace_period.as_secs(),
+        gc_dry_run = runtime_config.gc.dry_run,
         "Configuration loaded"
     );
 
@@ -97,12 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let s3_config = runtime_config.s3.as_ref().expect("S3 config required");
             let s3_client = s3::S3Client::new(s3_config).expect("unable to initialize S3 client");
 
-            loop {
-                if let Err(e) = cache_loop::run_once(&api, &http, &s3_client, &runtime_config).await
-                {
-                    error!(error = %e, "Cache cycle failed");
-                }
-                tokio::time::sleep(runtime_config.poll_interval).await;
+            tokio::select! {
+                _ = cache_loop_forever(&api, &http, &s3_client, &runtime_config) => unreachable!(),
+                _ = gc_loop_forever(&api, &s3_client, &runtime_config) => unreachable!(),
             }
         }
         CacheMode::Local => {
@@ -119,17 +124,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let file_server = tokio::spawn(async move { file_server::run(cache_dir, port).await });
 
-            let cache_loop = async {
-                loop {
-                    if let Err(e) =
-                        cache_loop::run_once(&api, &http, &local_storage, &runtime_config).await
-                    {
-                        error!(error = %e, "Cache cycle failed");
-                    }
-                    tokio::time::sleep(runtime_config.poll_interval).await;
-                }
-            };
-
             tokio::select! {
                 result = file_server => {
                     match result {
@@ -139,8 +133,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err("file server exited unexpectedly".into())
                 }
-                _ = cache_loop => unreachable!(),
+                _ = cache_loop_forever(&api, &http, &local_storage, &runtime_config) => unreachable!(),
+                _ = gc_loop_forever(&api, &local_storage, &runtime_config) => unreachable!(),
             }
+        }
+    }
+}
+
+async fn cache_loop_forever<S: StorageBackend>(
+    api: &ApiClient,
+    http: &reqwest::Client,
+    storage: &S,
+    config: &RuntimeConfig,
+) {
+    loop {
+        if let Err(e) = cache_loop::run_once(api, http, storage, config).await {
+            error!(error = %e, "Cache cycle failed");
+        }
+        tokio::time::sleep(config.poll_interval).await;
+    }
+}
+
+async fn gc_loop_forever<S: StorageBackend>(
+    api: &ApiClient,
+    storage: &S,
+    config: &RuntimeConfig,
+) {
+    if !config.gc.enabled {
+        info!("GC disabled (IMAGECACHE_GC_ENABLED=false)");
+        std::future::pending::<()>().await;
+        return;
+    }
+    // Sleep first so the cache loop can populate cached_urls before the first sweep —
+    // otherwise a just-started imagecache could see "no live keys" and sweep everything
+    // that's outside the grace period.
+    loop {
+        tokio::time::sleep(config.gc.interval).await;
+        if let Err(e) = gc::run_once(api, storage, config).await {
+            error!(error = %e, "GC cycle failed");
         }
     }
 }

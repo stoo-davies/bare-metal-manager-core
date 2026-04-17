@@ -16,9 +16,10 @@
  */
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::error::ImageCacheError;
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StoredObject};
 
 pub struct LocalStorage {
     cache_dir: PathBuf,
@@ -53,6 +54,39 @@ impl StorageBackend for LocalStorage {
                 tokio::fs::rename(&temp_dest, &dest).await?;
                 Ok(())
             }
+            Err(e) => Err(ImageCacheError::Io(e)),
+        }
+    }
+
+    async fn list_keys(&self) -> Result<Vec<StoredObject>, ImageCacheError> {
+        let mut out = Vec::new();
+        let mut dir = tokio::fs::read_dir(&self.cache_dir).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let meta = entry.metadata().await?;
+            if !meta.is_file() {
+                continue;
+            }
+            // Skip hidden files (e.g. the `.key.tmp` used during cross-device rename).
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let last_modified = meta.modified().unwrap_or_else(|_| SystemTime::now());
+            out.push(StoredObject {
+                key: name,
+                last_modified,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn delete_object(&self, key: &str) -> Result<(), ImageCacheError> {
+        let path = self.cache_dir.join(key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(ImageCacheError::Io(e)),
         }
     }
