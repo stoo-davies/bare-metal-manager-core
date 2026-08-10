@@ -52,13 +52,16 @@ RUN mkdir -p /deps && \
 # Stage 2
 FROM --platform=linux/arm64 ${IMG}:${TAG}-${DISTROLESS_DEBUG_TAG}
 
+ENV AGENT_PLATFORM_TYPE=containerized
+
 # Copy bash binary, libraries, and mft from builder
 COPY --from=builder /lib/aarch64-linux-gnu/libudev.so.1 /lib/aarch64-linux-gnu/libudev.so.1
 COPY --from=builder --chmod=755 /bin/bash /bin/bash
 COPY --from=builder --chmod=755 /extract/usr/bin/ /usr/bin/
 COPY --from=builder /deps/* /lib/
 
-# Copy forge-dpu-agent and set entry point
+# Copy forge-dpu-agent and the host-runtime lldpcli launcher, then set entry point
 COPY --chmod=755 target/aarch64-unknown-linux-gnu/release/forge-dpu-agent /usr/bin/forge-dpu-agent
+COPY --chmod=755 target/aarch64-unknown-linux-gnu/release/lldpcli /usr/sbin/lldpcli
 
 ENTRYPOINT ["/usr/bin/forge-dpu-agent"]

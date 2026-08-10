@@ -27,6 +27,7 @@ use ::rpc::machine_discovery::{DmiData, DpuData};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_host_support::hardware_enumeration::{
     enumerate_and_save_hardware, enumerate_hardware, load_hardware_from_cache,
+    load_lldp_interface_macs_from_cache,
 };
 use carbide_host_support::registration::register_machine;
 use carbide_utils::arch::CpuArchitecture;
@@ -61,6 +62,8 @@ mod fmds_client;
 pub mod duppet;
 mod hbn;
 mod health;
+#[doc(hidden)]
+pub mod host_lldpcli;
 mod host_machine_id;
 mod instance_metadata_endpoint;
 pub mod instrumentation;
@@ -372,6 +375,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         // Init-container entry point: provision the CA + snapshot hardware to the shared volume.
         // Output path is fixed (HW_CACHE_PATH) so the main container can always find it.
         Some(AgentCommand::InitContainer(options)) => {
+            host_lldpcli::stage()?;
             provision_bootstrap_ca(&options).await?;
             enumerate_and_save_hardware().await?;
             util::save_host_nameservers()?;
@@ -401,8 +405,8 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             println!("{}", serde_json::to_string_pretty(&health_report)?);
         }
 
-        Some(AgentCommand::LldpNeighbors) => {
-            let neighbors = carbide_host_support::lldp_collector::collect_lldp_neighbors()?;
+        Some(AgentCommand::LldpNeighbors(options)) => {
+            let neighbors = collect_lldp_neighbors(&options.agent_platform_type)?;
             println!("{neighbors:#?}");
         }
 
@@ -600,6 +604,26 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Collect LLDP neighbors using the source appropriate for the agent platform.
+pub fn collect_lldp_neighbors(
+    platform_type: &AgentPlatformType,
+) -> Result<Vec<carbide_host_support::lldp_collector::LldpNeighbor>, eyre::Report> {
+    match platform_type {
+        AgentPlatformType::DpuOs => {
+            Ok(carbide_host_support::lldp_collector::collect_lldp_neighbors()?)
+        }
+        AgentPlatformType::Containerized => {
+            let interface_macs = load_lldp_interface_macs_from_cache()
+                .wrap_err("load LLDP interface MACs from hardware cache failed")?;
+            Ok(
+                carbide_host_support::lldp_collector::collect_lldp_neighbors_with_interface_macs(
+                    &interface_macs,
+                )?,
+            )
+        }
+    }
 }
 
 struct Registration {

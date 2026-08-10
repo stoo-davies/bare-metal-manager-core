@@ -30,6 +30,10 @@ name = "agent"
 name = "forge-dpu-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "lldpcli"
+path = "src/lldpcli_main.rs"
+
 [dependencies]
 
 # [local-dependencies]

@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
@@ -32,6 +32,7 @@ use carbide_utils::{BF2_PRODUCT_NAME, BF3_PRODUCT_NAME};
 use libudev::Device;
 use procfs::{CpuInfo, FromRead};
 use rpc::machine_discovery::MemoryDevice;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uname::uname;
 
@@ -41,6 +42,18 @@ mod tpm;
 
 /// Path where the init container writes the hardware snapshot, and the containerized agent reads it from.
 pub const HW_CACHE_PATH: &str = "/data/hw_output.json";
+const SYSFS_NET_BASE: &str = "/sys/class/net";
+
+/// Host interface MACs captured for containerized LLDP collection.
+pub type LldpInterfaceMacs = BTreeMap<String, String>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HardwareCache {
+    #[serde(default)]
+    lldp_interface_macs: LldpInterfaceMacs,
+    #[serde(flatten)]
+    hardware_info: rpc_discovery::DiscoveryInfo,
+}
 
 pub(crate) const PCI_SUBCLASS: &str = "ID_PCI_SUBCLASS_FROM_DATABASE";
 const PCI_DEV_PATH: &str = "DEVPATH";
@@ -942,6 +955,46 @@ fn validate_enumerated(
     Ok(())
 }
 
+fn collect_lldp_interface_macs_from(
+    sysfs_net_base: &Path,
+) -> Result<LldpInterfaceMacs, HardwareEnumerationError> {
+    let mut interface_macs = LldpInterfaceMacs::new();
+    for entry in fs::read_dir(sysfs_net_base).map_err(|error| {
+        HardwareEnumerationError::GenericError(format!(
+            "Failed to enumerate {}: {error}",
+            sysfs_net_base.display()
+        ))
+    })? {
+        let entry =
+            entry.map_err(|error| HardwareEnumerationError::GenericError(error.to_string()))?;
+        let interface_name = entry.file_name().into_string().map_err(|name| {
+            HardwareEnumerationError::GenericError(format!(
+                "Network interface name is not valid UTF-8: {name:?}"
+            ))
+        })?;
+        let mac_address = match fs::read_to_string(entry.path().join("address")) {
+            Ok(mac_address) if !mac_address.trim().is_empty() => mac_address.trim().to_string(),
+            Ok(_) => {
+                warn!(interface_name, "Network interface has an empty MAC address");
+                continue;
+            }
+            Err(error) => {
+                warn!(interface_name, %error, "Could not read network interface MAC address");
+                continue;
+            }
+        };
+        if interface_macs
+            .insert(interface_name.clone(), mac_address)
+            .is_some()
+        {
+            return Err(HardwareEnumerationError::GenericError(format!(
+                "Duplicate network interface {interface_name}"
+            )));
+        }
+    }
+    Ok(interface_macs)
+}
+
 /// Enumerate hardware and save the result as JSON to [`HW_CACHE_PATH`].
 ///
 /// Used by the init container to snapshot host hardware info so the containerized agent can
@@ -978,8 +1031,13 @@ pub async fn enumerate_and_save_hardware()
             "Hardware enumeration incomplete; retrying in 10s",
             attempt
         );
+        let lldp_interface_macs = try_or_retry!(
+            collect_lldp_interface_macs_from(Path::new(SYSFS_NET_BASE)),
+            "LLDP interface MAC enumeration failed; retrying in 10s",
+            attempt
+        );
         try_or_retry!(
-            save_hardware_to(&info, HW_CACHE_PATH),
+            save_hardware_to(&info, &lldp_interface_macs, HW_CACHE_PATH),
             "Failed to save hardware cache; retrying in 10s",
             attempt
         );
@@ -999,14 +1057,25 @@ pub async fn enumerate_and_save_hardware()
 /// Used by the containerized agent instead of direct hardware probing.
 pub fn load_hardware_from_cache() -> Result<rpc_discovery::DiscoveryInfo, HardwareEnumerationError>
 {
-    load_hardware_from(HW_CACHE_PATH)
+    Ok(load_hardware_from(HW_CACHE_PATH)?.hardware_info)
+}
+
+/// Load host interface MACs captured for containerized LLDP collection.
+pub fn load_lldp_interface_macs_from_cache() -> Result<LldpInterfaceMacs, HardwareEnumerationError>
+{
+    Ok(load_hardware_from(HW_CACHE_PATH)?.lldp_interface_macs)
 }
 
 fn save_hardware_to(
     info: &rpc_discovery::DiscoveryInfo,
+    lldp_interface_macs: &LldpInterfaceMacs,
     path: &str,
 ) -> Result<(), HardwareEnumerationError> {
-    let json = serde_json::to_string_pretty(info)
+    let cache = HardwareCache {
+        lldp_interface_macs: lldp_interface_macs.clone(),
+        hardware_info: info.clone(),
+    };
+    let json = serde_json::to_string_pretty(&cache)
         .map_err(|e| HardwareEnumerationError::GenericError(e.to_string()))?;
     fs::write(path, json).map_err(|e| {
         HardwareEnumerationError::GenericError(format!(
@@ -1015,9 +1084,7 @@ fn save_hardware_to(
     })
 }
 
-fn load_hardware_from(
-    path: &str,
-) -> Result<rpc_discovery::DiscoveryInfo, HardwareEnumerationError> {
+fn load_hardware_from(path: &str) -> Result<HardwareCache, HardwareEnumerationError> {
     let contents = fs::read_to_string(path).map_err(|e| {
         HardwareEnumerationError::GenericError(format!(
             "Failed to read hardware cache from {path}: {e}"
@@ -1053,7 +1120,9 @@ mod tests {
     use carbide_test_support::{
         Case, Check, check_cases, check_values, scenarios, value_scenarios,
     };
-    use tempfile::NamedTempFile;
+    use std::os::unix::fs::symlink;
+
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
 
@@ -1105,6 +1174,9 @@ mod tests {
     // `FailsWith` row pins the path/parse error text in the returned message.
     #[test]
     fn save_load_cluster() {
+        let lldp_interface_macs =
+            LldpInterfaceMacs::from([("p0".to_string(), "00:11:22:33:44:55".to_string())]);
+
         // round-trip: minimal info survives save -> load
         Case {
             scenario: "minimal info round-trips machine_type",
@@ -1114,9 +1186,12 @@ mod tests {
         .check(|info| {
             let tmp = NamedTempFile::new().map_err(drop)?;
             let path = tmp.path().to_str().ok_or(())?;
-            save_hardware_to(&info, path).map_err(drop)?;
+            save_hardware_to(&info, &lldp_interface_macs, path).map_err(drop)?;
             let loaded = load_hardware_from(path).map_err(drop)?;
-            Ok::<_, ()>(loaded.machine_type == "aarch64")
+            Ok::<_, ()>(
+                loaded.hardware_info.machine_type == "aarch64"
+                    && loaded.lldp_interface_macs == lldp_interface_macs,
+            )
         });
 
         // round-trip: nested block_devices fields survive
@@ -1136,13 +1211,13 @@ mod tests {
         .check(|info| {
             let tmp = NamedTempFile::new().map_err(drop)?;
             let path = tmp.path().to_str().ok_or(())?;
-            save_hardware_to(&info, path).map_err(drop)?;
+            save_hardware_to(&info, &lldp_interface_macs, path).map_err(drop)?;
             let loaded = load_hardware_from(path).map_err(drop)?;
             Ok::<_, ()>(
-                loaded.machine_type == "x86_64"
-                    && loaded.block_devices.len() == 1
-                    && loaded.block_devices[0].model == "test-disk"
-                    && loaded.block_devices[0].serial == "SN123",
+                loaded.hardware_info.machine_type == "x86_64"
+                    && loaded.hardware_info.block_devices.len() == 1
+                    && loaded.hardware_info.block_devices[0].model == "test-disk"
+                    && loaded.hardware_info.block_devices[0].serial == "SN123",
             )
         });
 
@@ -1170,6 +1245,45 @@ mod tests {
             let err = load_hardware_from(path).unwrap_err();
             Ok::<_, ()>(err.to_string().contains("Failed to parse hardware cache"))
         });
+
+        // Cache files written before LLDP data was added still load with an empty map.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        fs::write(path, serde_json::to_vec(&minimal_discovery_info()).unwrap()).unwrap();
+        let loaded = load_hardware_from(path).unwrap();
+        assert_eq!(loaded.hardware_info.machine_type, "aarch64");
+        assert!(loaded.lldp_interface_macs.is_empty());
+    }
+
+    #[test]
+    fn collect_lldp_interface_macs() {
+        let temp = TempDir::new().unwrap();
+        let class_net = temp.path().join("class/net");
+        let pci_device = temp.path().join("devices/pci0000:00/0000:00:00.0/net/p0");
+        let virtual_device = temp.path().join("devices/virtual/net/lo");
+        let missing_address_device = temp.path().join("devices/virtual/net/dummy0");
+        fs::create_dir_all(&class_net).unwrap();
+        fs::create_dir_all(&pci_device).unwrap();
+        fs::create_dir_all(&virtual_device).unwrap();
+        fs::create_dir_all(&missing_address_device).unwrap();
+        fs::write(pci_device.join("address"), "00:11:22:33:44:55\n").unwrap();
+        fs::write(virtual_device.join("address"), "00:00:00:00:00:00\n").unwrap();
+        symlink(
+            "../../devices/pci0000:00/0000:00:00.0/net/p0",
+            class_net.join("p0"),
+        )
+        .unwrap();
+        symlink("../../devices/virtual/net/lo", class_net.join("lo")).unwrap();
+        symlink("../../devices/virtual/net/dummy0", class_net.join("dummy0")).unwrap();
+
+        let interface_macs = collect_lldp_interface_macs_from(&class_net).unwrap();
+        assert_eq!(
+            interface_macs,
+            LldpInterfaceMacs::from([
+                ("lo".to_string(), "00:00:00:00:00:00".to_string()),
+                ("p0".to_string(), "00:11:22:33:44:55".to_string()),
+            ])
+        );
     }
 
     // Init-container bind-mount paths and the cache path are part of the

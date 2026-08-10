@@ -84,3 +84,68 @@ tests:
             hostPath:
               path: /custom/cert/dir
               type: DirectoryOrCreate
+
+  - it: should mount the host lldpd socket writable in the main container
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: lldpd-socket
+            mountPath: /run/lldpd.socket
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: lldpd-socket
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: lldpd-socket
+            hostPath:
+              path: /run/lldpd.socket
+              type: Socket
+
+  - it: should expose the host LLDP runtime only to the init container
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: host-lldpcli
+            mountPath: /host/usr/sbin/lldpcli
+            readOnly: true
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: host-lib
+            mountPath: /host/lib
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: host-lldpcli
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: host-lib
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-lldpcli
+            hostPath:
+              path: /usr/sbin/lldpcli
+              type: File
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-lib
+            hostPath:
+              path: /lib
+              type: Directory

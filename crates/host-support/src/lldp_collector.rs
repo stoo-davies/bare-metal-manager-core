@@ -8,6 +8,8 @@ use carbide_utils::cmd::Cmd;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::hardware_enumeration::LldpInterfaceMacs;
+
 #[derive(thiserror::Error, Debug)]
 pub enum LldpCollectorError {
     #[error("LLDP error: {0}")]
@@ -100,6 +102,23 @@ pub struct LldpResponse {
 
 /// Returns one `LldpNeighbor` per LLDP neighbor, filtering out self-loopback ones.
 pub fn collect_lldp_neighbors() -> LldpCollectorResult<Vec<LldpNeighbor>> {
+    collect_lldp_neighbors_with(read_interface_mac)
+}
+
+/// Collect LLDP neighbors using interface MACs captured by the init container.
+pub fn collect_lldp_neighbors_with_interface_macs(
+    interface_macs: &LldpInterfaceMacs,
+) -> LldpCollectorResult<Vec<LldpNeighbor>> {
+    collect_lldp_neighbors_with(|ifname| cached_interface_mac(interface_macs, ifname))
+}
+
+fn cached_interface_mac(interface_macs: &LldpInterfaceMacs, ifname: &str) -> Option<String> {
+    interface_macs.get(ifname).cloned()
+}
+
+fn collect_lldp_neighbors_with(
+    interface_mac: impl Fn(&str) -> Option<String>,
+) -> LldpCollectorResult<Vec<LldpNeighbor>> {
     let local_chassis_id = get_local_chassis_id();
 
     Ok(get_all_lldp_neighbors()?
@@ -113,7 +132,7 @@ pub fn collect_lldp_neighbors() -> LldpCollectorResult<Vec<LldpNeighbor>> {
         })
         .filter_map(|lldp| {
             Some(LldpNeighbor {
-                local_mac: read_interface_mac(&lldp.local_port)?,
+                local_mac: interface_mac(&lldp.local_port)?,
                 switch: lldp,
             })
         })
@@ -269,7 +288,8 @@ fn parse_lldp_neighbors(
 #[cfg(test)]
 mod tests {
     use super::{
-        LldpId, is_self_loopback, parse_lldp_neighbors, parse_local_chassis_id, rpc_discovery,
+        LldpId, LldpInterfaceMacs, cached_interface_mac, is_self_loopback, parse_lldp_neighbors,
+        parse_local_chassis_id, rpc_discovery,
     };
 
     // Three LLDP neighbors on a single physical port (`vlldp`). `-f json0` emits
@@ -436,5 +456,16 @@ mod tests {
             &neighbor("local", "58:a2:e1:54:6f:ae"),
             &own
         ));
+    }
+
+    #[test]
+    fn cached_interface_mac_map_omits_missing_interfaces() {
+        let interface_macs = LldpInterfaceMacs::from([("p0".into(), "00:11:22:33:44:55".into())]);
+
+        assert_eq!(
+            cached_interface_mac(&interface_macs, "p0").as_deref(),
+            Some("00:11:22:33:44:55")
+        );
+        assert_eq!(cached_interface_mac(&interface_macs, "dummy0"), None);
     }
 }

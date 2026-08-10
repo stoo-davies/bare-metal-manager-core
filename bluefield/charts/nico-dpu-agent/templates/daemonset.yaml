@@ -127,6 +127,12 @@ spec:
             - name: host-resolv-conf
               mountPath: /host-resolv.conf
               readOnly: true
+            - name: host-lldpcli
+              mountPath: /host/usr/sbin/lldpcli
+              readOnly: true
+            - name: host-lib
+              mountPath: /host/lib
+              readOnly: true
             {{- if eq $bootstrapCaSource "mounted" }}
             - name: bootstrap-ca-source
               mountPath: /var/run/secrets/nico-bootstrap-ca
@@ -203,6 +209,8 @@ spec:
             - name: hw-cache
               mountPath: /data
               readOnly: true
+            - name: lldpd-socket
+              mountPath: /run/lldpd.socket
       volumes:
         {{- with .Values.fmds.sign_proxy_url }}
         - name: agent-config
@@ -215,6 +223,18 @@ spec:
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}
+        - name: lldpd-socket
+          hostPath:
+            path: /run/lldpd.socket
+            type: Socket
+        - name: host-lldpcli
+          hostPath:
+            path: /usr/sbin/lldpcli
+            type: File
+        - name: host-lib
+          hostPath:
+            path: /lib
+            type: Directory
         - name: sys
           hostPath:
             path: /sys

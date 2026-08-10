@@ -1855,7 +1855,7 @@ jobs:
       - name: Stage bluefield binaries for upload
         run: |
           mkdir -p bluefield-binaries-dir/target/aarch64-unknown-linux-gnu/release
-          cp target/aarch64-unknown-linux-gnu/release/{forge-dpu-agent,forge-dhcp-server,forge-dpu-otel-agent,carbide-fmds} \
+          cp target/aarch64-unknown-linux-gnu/release/{forge-dpu-agent,lldpcli,forge-dhcp-server,forge-dpu-otel-agent,carbide-fmds} \
             bluefield-binaries-dir/target/aarch64-unknown-linux-gnu/release/
 
       - name: Upload bluefield binaries

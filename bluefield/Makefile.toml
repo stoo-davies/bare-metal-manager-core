@@ -94,14 +94,20 @@ docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
     "--bin" \
     "forge-dpu-agent" \
     "--bin" \
+    "lldpcli" \
+    "--bin" \
     "forge-dhcp-server"
     docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) build-artifacts-container-cross-aarch64:latest "aarch64-linux-gnu-strip" \
     "/carbide/target/aarch64-unknown-linux-gnu/release/forge-dpu-agent"
     docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) build-artifacts-container-cross-aarch64:latest "aarch64-linux-gnu-strip" \
     "/carbide/target/aarch64-unknown-linux-gnu/release/forge-dhcp-server"
+    docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) build-artifacts-container-cross-aarch64:latest "aarch64-linux-gnu-strip" \
+    "/carbide/target/aarch64-unknown-linux-gnu/release/lldpcli"
 for path in \
     "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-dpu-agent" \
     "${REPO_ROOT}/target/release/forge-dpu-agent" \
+    "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/lldpcli" \
+    "${REPO_ROOT}/target/release/lldpcli" \
     "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-dhcp-server" \
     "${REPO_ROOT}/target/release/forge-dhcp-server"; do
     bash "${REPO_ROOT}/scripts/check-aarch64-pagesize.sh" --allow-empty "${path}"
@@ -119,10 +125,12 @@ description = "Referring to the prebuilt 'build' task doesn't work here, since i
 script = '''
 set -e
 
-cargo build --release --bin forge-dpu-agent --bin forge-dhcp-server
+cargo build --release --bin forge-dpu-agent --bin lldpcli --bin forge-dhcp-server
 for path in \
     "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-dpu-agent" \
     "${REPO_ROOT}/target/release/forge-dpu-agent" \
+    "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/lldpcli" \
+    "${REPO_ROOT}/target/release/lldpcli" \
     "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-dhcp-server" \
     "${REPO_ROOT}/target/release/forge-dhcp-server"; do
     bash "${REPO_ROOT}/scripts/check-aarch64-pagesize.sh" --allow-empty "${path}"

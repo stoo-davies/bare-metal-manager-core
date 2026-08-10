@@ -59,7 +59,7 @@ pub enum AgentCommand {
     Health,
 
     #[clap(about = "Print LLDP neighbors visible on this host and exit")]
-    LldpNeighbors,
+    LldpNeighbors(LldpNeighborsOptions),
 
     #[clap(about = "One-off network monitor")]
     Network(NetworkOptions),
@@ -426,6 +426,17 @@ pub struct HardwareOptions {
 }
 
 #[derive(Parser, Debug)]
+pub struct LldpNeighborsOptions {
+    #[clap(
+        long,
+        default_value = "dpu-os",
+        help = "Set the platform type. Specify \"dpu-os\" or \"containerized\".",
+        env = "AGENT_PLATFORM_TYPE"
+    )]
+    pub agent_platform_type: AgentPlatformType,
+}
+
+#[derive(Parser, Debug)]
 pub struct NetworkOptions {
     #[clap(
         long,
@@ -702,6 +713,30 @@ mod tests {
                 .is_ok_and(|opts| matches!(opts.cmd, Some(AgentCommand::Hardware(_))))
         };
             "remaining platform types parse as the hardware subcommand" {
+                "dpu-os" => true,
+                "containerized" => true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_lldp_neighbors_subcommand_accepts_platform_types() {
+        value_scenarios!(run = |value: &str| {
+            Options::try_parse_from([
+                "forge-dpu-agent",
+                "lldp-neighbors",
+                "--agent-platform-type",
+                value,
+            ])
+            .ok()
+            .and_then(|opts| match opts.cmd {
+                Some(AgentCommand::LldpNeighbors(options)) => {
+                    Some(platform_tag(&options.agent_platform_type))
+                }
+                _ => None,
+            }) == Some(value)
+        };
+            "supported LLDP platform types parse" {
                 "dpu-os" => true,
                 "containerized" => true,
             }
