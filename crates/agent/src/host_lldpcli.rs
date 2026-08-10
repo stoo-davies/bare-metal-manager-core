@@ -93,11 +93,38 @@ fn stage_at(
         copy_file(&source, &temporary_lib.join(soname), 0o644)?;
     }
 
+    let closure = Command::new(&temporary_loader)
+        .arg("--list")
+        .arg("--inhibit-cache")
+        .arg("--library-path")
+        .arg(&temporary_lib)
+        .arg(&temporary_client)
+        .env_remove("LD_AUDIT")
+        .env_remove("LD_LIBRARY_PATH")
+        .env_remove("LD_PRELOAD")
+        .output()
+        .wrap_err("failed to inspect staged lldpcli dependencies")?;
+    if !closure.status.success() {
+        bail!(
+            "staged lldpcli dependency inspection failed: {}",
+            String::from_utf8_lossy(&closure.stderr).trim()
+        );
+    }
+    validate_staged_dependencies(
+        &String::from_utf8_lossy(&closure.stdout),
+        &temporary_lib,
+        &temporary_loader,
+    )?;
+
     let version = Command::new(&temporary_loader)
+        .arg("--inhibit-cache")
         .arg("--library-path")
         .arg(&temporary_lib)
         .arg(&temporary_client)
         .arg("-vv")
+        .env_remove("LD_AUDIT")
+        .env_remove("LD_LIBRARY_PATH")
+        .env_remove("LD_PRELOAD")
         .output()
         .wrap_err("failed to execute staged lldpcli")?;
     if !version.status.success() {
@@ -143,6 +170,84 @@ fn copy_file(source: &Path, destination: &Path, mode: u32) -> eyre::Result<()> {
         )
     })?;
     fs::set_permissions(destination, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+fn validate_staged_dependencies(
+    output: &str,
+    staged_lib: &Path,
+    staged_loader: &Path,
+) -> eyre::Result<()> {
+    let canonical_staged_lib = fs::canonicalize(staged_lib)
+        .wrap_err_with(|| format!("failed to resolve {}", staged_lib.display()))?;
+    let canonical_staged_loader = fs::canonicalize(staged_loader)
+        .wrap_err_with(|| format!("failed to resolve {}", staged_loader.display()))?;
+    let mut dependency_count = 0;
+    let mut loader_seen = false;
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let (name, resolved) = if let Some((name, resolved)) = line.split_once("=>") {
+            let name = name.trim();
+            let resolved = resolved.trim();
+            if resolved.starts_with("not found") {
+                bail!("staged lldpcli dependency {name} was not found");
+            }
+            let resolved = resolved
+                .split_whitespace()
+                .next()
+                .wrap_err_with(|| format!("missing path for staged lldpcli dependency {name}"))?;
+            (name, Path::new(resolved))
+        } else {
+            let entry = line
+                .split_whitespace()
+                .next()
+                .wrap_err("missing staged lldpcli dependency entry")?;
+            if entry == "linux-vdso.so.1" {
+                continue;
+            }
+            let resolved = Path::new(entry);
+            if !resolved.is_absolute() {
+                bail!("invalid staged lldpcli dependency entry {line:?}");
+            }
+            (entry, resolved)
+        };
+
+        let canonical_resolved = fs::canonicalize(resolved).wrap_err_with(|| {
+            format!(
+                "failed to resolve staged lldpcli dependency {name} at {}",
+                resolved.display()
+            )
+        })?;
+        if !canonical_resolved.starts_with(&canonical_staged_lib) {
+            bail!(
+                "staged lldpcli dependency {name} resolved outside {}: {}",
+                staged_lib.display(),
+                canonical_resolved.display()
+            );
+        }
+        if Path::new(name).is_absolute() {
+            if canonical_resolved != canonical_staged_loader {
+                bail!(
+                    "staged lldpcli loader resolved to unexpected path {}",
+                    canonical_resolved.display()
+                );
+            }
+            loader_seen = true;
+        } else {
+            dependency_count += 1;
+        }
+    }
+
+    if dependency_count == 0 {
+        bail!("staged loader reported no lldpcli dependencies");
+    }
+    if !loader_seen {
+        bail!("staged loader did not report itself in the lldpcli dependency closure");
+    }
     Ok(())
 }
 
@@ -229,6 +334,7 @@ pub fn exec(args: impl IntoIterator<Item = OsString>) -> eyre::Result<()> {
     setuid(uid).wrap_err("failed to set lldpcli user")?;
 
     let error = Command::new(RUNTIME_LOADER)
+        .arg("--inhibit-cache")
         .arg("--library-path")
         .arg(RUNTIME_LIB)
         .arg(RUNTIME_CLIENT)
@@ -245,6 +351,7 @@ mod tests {
     use super::*;
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
+    use carbide_test_support::{Case, check_cases};
 
     #[test]
     fn parses_loader_dependencies() {
@@ -275,6 +382,66 @@ mod tests {
     }
 
     #[test]
+    fn validates_staged_dependency_paths() {
+        let fixture = tempfile::tempdir().unwrap();
+        let staged_lib = fixture.path().join("staged/lib");
+        let staged_loader = staged_lib.join("ld-linux-aarch64.so.1");
+        let staged_dependency = staged_lib.join("liblldpctl.so.4");
+        let outside_dependency = fixture.path().join("libc.so.6");
+        fs::create_dir_all(&staged_lib).unwrap();
+        fs::write(&staged_loader, "loader").unwrap();
+        fs::write(&staged_dependency, "lldp").unwrap();
+        fs::write(&outside_dependency, "libc").unwrap();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "complete closure resolves from staged directory",
+                    input: format!(
+                        "linux-vdso.so.1 (0x1)\nliblldpctl.so.4 => {} (0x2)\n{} (0x3)",
+                        staged_dependency.display(),
+                        staged_loader.display()
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "missing dependency is rejected",
+                    input: "liblldpctl.so.4 => not found".to_string(),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "system fallback is rejected",
+                    input: format!("libc.so.6 => {} (0x1)", outside_dependency.display()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "unexpected absolute entry is rejected",
+                    input: format!("{} (0x1)", outside_dependency.display()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "malformed output is rejected",
+                    input: "liblldpctl.so.4".to_string(),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "empty dependency closure is rejected",
+                    input: "linux-vdso.so.1 (0x1)".to_string(),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "dependency closure without loader is rejected",
+                    input: format!("liblldpctl.so.4 => {} (0x1)", staged_dependency.display()),
+                    expect: Fails,
+                },
+            ],
+            |output| {
+                validate_staged_dependencies(&output, &staged_lib, &staged_loader).map_err(drop)
+            },
+        );
+    }
+
+    #[test]
     fn stages_runtime_with_host_loader() {
         let fixture = tempfile::tempdir().unwrap();
         let host_client = fixture.path().join("lldpcli");
@@ -290,9 +457,9 @@ mod tests {
         fs::write(
             &host_loader,
             format!(
-                "#!/bin/sh\necho 'liblldpctl.so.4 => {} (0x1)'\necho '/lib/ld-linux-aarch64.so.1 => {} (0x2)'\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--list\" ]; then\n  if [ \"$0\" = \"{}\" ]; then\n    dependency=\"{}\"\n  else\n    dependency=\"$(dirname \"$0\")/liblldpctl.so.4\"\n  fi\n  echo \"liblldpctl.so.4 => $dependency (0x1)\"\n  echo \"$0 (0x2)\"\nelse\n  echo 'lldpcli 1.0.18'\nfi\n",
+                host_loader.display(),
                 dependency.display(),
-                host_loader.display()
             ),
         )
         .unwrap();
@@ -320,5 +487,45 @@ mod tests {
             0o755
         );
         assert!(runtime_root.join("version.txt").is_file());
+    }
+
+    #[test]
+    fn does_not_publish_runtime_with_external_dependency() {
+        let fixture = tempfile::tempdir().unwrap();
+        let host_client = fixture.path().join("lldpcli");
+        let host_lib = fixture.path().join("lib");
+        let architecture_lib = host_lib.join("aarch64-linux-gnu");
+        let host_loader = host_lib.join("ld-linux-aarch64.so.1");
+        let dependency = architecture_lib.join("liblldpctl.so.4");
+        let outside_dependency = fixture.path().join("outside.so");
+        let runtime_root = fixture.path().join("data/host-lldp");
+        fs::create_dir_all(&architecture_lib).unwrap();
+        fs::create_dir_all(runtime_root.parent().unwrap()).unwrap();
+        fs::write(&host_client, "client").unwrap();
+        fs::write(&dependency, "dependency").unwrap();
+        fs::write(&outside_dependency, "outside").unwrap();
+        fs::write(
+            &host_loader,
+            format!(
+                "#!/bin/sh\nif [ \"$0\" = \"{}\" ]; then\n  dependency=\"{}\"\nelse\n  dependency=\"{}\"\nfi\necho \"liblldpctl.so.4 => $dependency (0x1)\"\necho \"$0 (0x2)\"\n",
+                host_loader.display(),
+                dependency.display(),
+                outside_dependency.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&host_loader, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            stage_at(
+                &host_client,
+                &host_lib,
+                &host_loader,
+                &architecture_lib,
+                &runtime_root,
+            )
+            .is_err()
+        );
+        assert!(!runtime_root.exists());
     }
 }
