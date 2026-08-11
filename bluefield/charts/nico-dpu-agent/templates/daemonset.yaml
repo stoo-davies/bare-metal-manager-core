@@ -168,6 +168,8 @@ spec:
               value: "0"
             - name: RUST_LOG
               value: "info"
+            - name: AGENT_PLATFORM_TYPE
+              value: "containerized"
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
