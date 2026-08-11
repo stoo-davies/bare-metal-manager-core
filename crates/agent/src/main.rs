@@ -21,8 +21,8 @@ fn main() -> eyre::Result<()> {
     let options = agent::Options::load();
 
     // Purely local interrogation for troubleshooting.
-    if matches!(options.cmd, Some(agent::AgentCommand::LldpNeighbors)) {
-        let neighbors = carbide_host_support::lldp_collector::collect_lldp_neighbors()?;
+    if let Some(agent::AgentCommand::LldpNeighbors(lldp_options)) = &options.cmd {
+        let neighbors = agent::collect_lldp_neighbors(&lldp_options.agent_platform_type)?;
         println!("{neighbors:#?}");
         return Ok(());
     }

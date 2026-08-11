@@ -84,3 +84,39 @@ tests:
             hostPath:
               path: /custom/cert/dir
               type: DirectoryOrCreate
+
+  - it: should mount the host LLDP snapshot read-only in the main container
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: lldp-snapshot
+            mountPath: /var/lib/nico/lldp
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: lldp-snapshot
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: lldp-snapshot
+            hostPath:
+              path: /var/lib/nico/lldp
+              type: DirectoryOrCreate
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: lldpd-socket
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-lldpcli
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-lib

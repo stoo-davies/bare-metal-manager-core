@@ -203,6 +203,9 @@ spec:
             - name: hw-cache
               mountPath: /data
               readOnly: true
+            - name: lldp-snapshot
+              mountPath: /var/lib/nico/lldp
+              readOnly: true
       volumes:
         {{- with .Values.fmds.sign_proxy_url }}
         - name: agent-config
@@ -215,6 +218,10 @@ spec:
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}
+        - name: lldp-snapshot
+          hostPath:
+            path: /var/lib/nico/lldp
+            type: DirectoryOrCreate
         - name: sys
           hostPath:
             path: /sys

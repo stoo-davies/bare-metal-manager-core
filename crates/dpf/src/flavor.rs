@@ -27,6 +27,7 @@ use crate::crds::dpuflavors_generated::{
     DpuFlavorEwNicConfigurationsSpectrumXOptimizedMultiplaneMode,
     DpuFlavorEwNicConfigurationsSpectrumXOptimizedOverlay, DpuFlavorGrub, DpuFlavorNvconfig,
     DpuFlavorNvconfigDevice, DpuFlavorOvs, DpuFlavorSpec, DpuFlavorSysctl,
+    DpuFlavorSystemdServices, DpuFlavorSystemdServicesOperation,
 };
 use crate::types::{DpfProxyDetails, DpuDeploymentType};
 
@@ -225,7 +226,7 @@ pub fn flavor_bf4(
             system_reserved_resources: None,
             ew_nic_configurations: None,
             packages: None,
-            systemd_services: None,
+            systemd_services: Some(lldp_snapshot_systemd_services()),
             host_os_init: None,
             scalable_functions: None,
         },
@@ -460,7 +461,7 @@ pub fn default_flavor(
             system_reserved_resources: None,
             ew_nic_configurations: None,
             packages: None,
-            systemd_services: None,
+            systemd_services: Some(lldp_snapshot_systemd_services()),
             host_os_init: None,
             scalable_functions: None,
         },
@@ -551,6 +552,30 @@ fn get_config_files(
             r#type: None,
         },
         DpuFlavorConfigFiles {
+            path: "/usr/local/sbin/nico-lldp-snapshot".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0755".to_string()),
+            raw: Some(lldp_snapshot_script()),
+            content_from: None,
+            r#type: None,
+        },
+        DpuFlavorConfigFiles {
+            path: "/etc/systemd/system/nico-lldp-snapshot.service".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some(lldp_snapshot_service()),
+            content_from: None,
+            r#type: None,
+        },
+        DpuFlavorConfigFiles {
+            path: "/etc/systemd/system/nico-lldp-snapshot.timer".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some(lldp_snapshot_timer()),
+            content_from: None,
+            r#type: None,
+        },
+        DpuFlavorConfigFiles {
             path: "/etc/mellanox/mlnx-bf.conf".to_string(),
             operation: Some(DpuFlavorConfigFilesOperation::Override),
             permissions: Some("0644".to_string()),
@@ -613,6 +638,117 @@ fn get_config_files(
 
     Ok(config_files)
 }
+
+fn lldp_snapshot_systemd_services() -> Vec<DpuFlavorSystemdServices> {
+    vec![DpuFlavorSystemdServices {
+        name: "nico-lldp-snapshot.timer".to_string(),
+        operation: DpuFlavorSystemdServicesOperation::EnableAndStart,
+    }]
+}
+
+fn lldp_snapshot_script() -> String {
+    concat!(
+        "#!/bin/bash\n",
+        "set -euo pipefail\n",
+        "\n",
+        "readonly snapshot_root=/var/lib/nico/lldp\n",
+        "readonly snapshots_dir=${snapshot_root}/snapshots\n",
+        "install -d -m 0755 \"${snapshots_dir}\"\n",
+        "temporary_dir=$(mktemp -d \"${snapshots_dir}/.tmp.XXXXXX\")\n",
+        "temporary_link=\n",
+        "remove_snapshot_dir() {\n",
+        "    local snapshot_dir=${1:?snapshot directory is required}\n",
+        "    if [[ -d ${snapshot_dir}/interface-macs ]]; then\n",
+        "        find \"${snapshot_dir}/interface-macs\" -mindepth 1 -maxdepth 1 -type f -exec rm -f -- {} +\n",
+        "        rmdir -- \"${snapshot_dir}/interface-macs\"\n",
+        "    fi\n",
+        "    rm -f -- \"${snapshot_dir}/neighbors.json\" \"${snapshot_dir}/chassis.json\" \"${snapshot_dir}/captured-at\"\n",
+        "    rmdir -- \"${snapshot_dir}\"\n",
+        "}\n",
+        "cleanup() {\n",
+        "    if [[ -n ${temporary_dir:-} && -d ${temporary_dir} ]]; then\n",
+        "        remove_snapshot_dir \"${temporary_dir}\"\n",
+        "    fi\n",
+        "    if [[ -n ${temporary_link:-} && -L ${temporary_link} ]]; then\n",
+        "        rm -f -- \"${temporary_link}\"\n",
+        "    fi\n",
+        "}\n",
+        "trap cleanup EXIT\n",
+        "install -d -m 0755 \"${temporary_dir}/interface-macs\"\n",
+        "\n",
+        "lldpcli -f json0 show neighbors details >\"${temporary_dir}/neighbors.json\"\n",
+        "if [[ ! -s ${temporary_dir}/neighbors.json ]]; then\n",
+        "    echo 'lldpcli returned an empty neighbor snapshot' >&2\n",
+        "    exit 1\n",
+        "fi\n",
+        "if ! lldpcli -f json0 show chassis >\"${temporary_dir}/chassis.json\"; then\n",
+        "    echo 'could not collect local LLDP chassis; publishing neighbors without self-loop filtering' >&2\n",
+        "    printf '{\"local-chassis\":[]}\\n' >\"${temporary_dir}/chassis.json\"\n",
+        "fi\n",
+        "\n",
+        "for address_path in /sys/class/net/*/address; do\n",
+        "    [[ -r ${address_path} ]] || continue\n",
+        "    interface_dir=${address_path%/address}\n",
+        "    interface_name=${interface_dir##*/}\n",
+        "    mac=$(tr -d '\\n' <\"${address_path}\")\n",
+        "    [[ -n ${mac} ]] || continue\n",
+        "    printf '%s\\n' \"${mac}\" >\"${temporary_dir}/interface-macs/${interface_name}\"\n",
+        "done\n",
+        "date +%s >\"${temporary_dir}/captured-at\"\n",
+        "chmod 0644 \"${temporary_dir}/neighbors.json\" \"${temporary_dir}/chassis.json\" \"${temporary_dir}/captured-at\"\n",
+        "find \"${temporary_dir}/interface-macs\" -type f -exec chmod 0644 {} +\n",
+        "\n",
+        "generation=snapshot-$(date +%s)-$$\n",
+        "published_dir=${snapshots_dir}/${generation}\n",
+        "mv \"${temporary_dir}\" \"${published_dir}\"\n",
+        "temporary_dir=\n",
+        "temporary_link=${snapshot_root}/.current.$$\n",
+        "ln -s \"snapshots/${generation}\" \"${temporary_link}\"\n",
+        "mv -Tf \"${temporary_link}\" \"${snapshot_root}/current\"\n",
+        "temporary_link=\n",
+        "while IFS= read -r -d '' stale_dir; do\n",
+        "    remove_snapshot_dir \"${stale_dir}\"\n",
+        "done < <(find \"${snapshots_dir}\" -mindepth 1 -maxdepth 1 -type d \\\n",
+        "    \\( -name 'snapshot-*' -o -name '.tmp.*' \\) -mmin +10 -print0)\n",
+    )
+    .to_string()
+}
+
+fn lldp_snapshot_service() -> String {
+    concat!(
+        "[Unit]\n",
+        "Description=Capture LLDP data for the containerized NICo DPU agent\n",
+        "Requires=lldpd.service\n",
+        "After=lldpd.service\n",
+        "\n",
+        "[Service]\n",
+        "Type=oneshot\n",
+        "ExecStart=/usr/local/sbin/nico-lldp-snapshot\n",
+        "User=root\n",
+        "Group=root\n",
+        "UMask=0022\n",
+        "NoNewPrivileges=yes\n",
+    )
+    .to_string()
+}
+
+fn lldp_snapshot_timer() -> String {
+    concat!(
+        "[Unit]\n",
+        "Description=Refresh LLDP data for the containerized NICo DPU agent\n",
+        "\n",
+        "[Timer]\n",
+        "OnBootSec=30s\n",
+        "OnUnitActiveSec=2min\n",
+        "AccuracySec=10s\n",
+        "Unit=nico-lldp-snapshot.service\n",
+        "\n",
+        "[Install]\n",
+        "WantedBy=timers.target\n",
+    )
+    .to_string()
+}
+
 fn get_bf4_default_nvconfig() -> DpuFlavorNvconfig {
     let parameters = vec![
         "PF_BAR2_ENABLE=0".to_string(),
@@ -1745,16 +1881,16 @@ mod tests {
                     .unwrap()
                     .len()
             };
-            "no proxy yields seven base files" {
-                None => 7,
+            "no proxy yields ten base files" {
+                None => 10,
             }
 
-            "proxy with empty no_proxy appends an eighth" {
-                proxy("http://proxy:3128", &[]) => 8,
+            "proxy with empty no_proxy appends an eleventh" {
+                proxy("http://proxy:3128", &[]) => 11,
             }
 
             "proxy with no_proxy list still appends exactly one" {
-                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => 8,
+                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => 11,
             }
         );
     }
@@ -1783,7 +1919,7 @@ mod tests {
 
     #[test]
     fn base_config_file_paths_are_present() {
-        // The seven base files always exist regardless of proxy, with these paths.
+        // The ten base files always exist regardless of proxy, with these paths.
         let files = default_flavor("ns", &None)
             .unwrap()
             .spec
@@ -1806,6 +1942,18 @@ mod tests {
 
             "lldpd defaults" {
                 "/etc/default/lldpd" => true,
+            }
+
+            "LLDP snapshot script" {
+                "/usr/local/sbin/nico-lldp-snapshot" => true,
+            }
+
+            "LLDP snapshot service" {
+                "/etc/systemd/system/nico-lldp-snapshot.service" => true,
+            }
+
+            "LLDP snapshot timer" {
+                "/etc/systemd/system/nico-lldp-snapshot.timer" => true,
             }
 
             "mlnx-bf.conf" {
@@ -1849,6 +1997,113 @@ mod tests {
             "lldpd enables LLDP-MED inventory" {
                 ("/etc/default/lldpd", "DAEMON_ARGS=\"-M 1\"\n") => true,
             }
+        );
+    }
+
+    #[test]
+    fn lldp_snapshot_files_have_expected_contract() {
+        let files = default_flavor("ns", &None)
+            .unwrap()
+            .spec
+            .config_files
+            .unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "snapshot script publishes complete generations atomically",
+                    input: (
+                        "/usr/local/sbin/nico-lldp-snapshot",
+                        "0755",
+                        &[
+                            "lldpcli -f json0 show neighbors details",
+                            "lldpcli -f json0 show chassis",
+                            "/sys/class/net/*/address",
+                            "mv -Tf",
+                        ][..],
+                    ),
+                    expect: Yields(true),
+                },
+                Case {
+                    scenario: "oneshot service is ordered after lldpd",
+                    input: (
+                        "/etc/systemd/system/nico-lldp-snapshot.service",
+                        "0644",
+                        &[
+                            "Requires=lldpd.service",
+                            "After=lldpd.service",
+                            "Type=oneshot",
+                        ][..],
+                    ),
+                    expect: Yields(true),
+                },
+                Case {
+                    scenario: "timer refreshes snapshots every two minutes",
+                    input: (
+                        "/etc/systemd/system/nico-lldp-snapshot.timer",
+                        "0644",
+                        &[
+                            "OnBootSec=30s",
+                            "OnUnitActiveSec=2min",
+                            "WantedBy=timers.target",
+                        ][..],
+                    ),
+                    expect: Yields(true),
+                },
+            ],
+            |(path, permissions, tokens)| {
+                let file = files.iter().find(|file| file.path == path).ok_or(())?;
+                let raw = file.raw.as_deref().ok_or(())?;
+                Ok::<_, ()>(
+                    matches!(
+                        file.operation,
+                        Some(DpuFlavorConfigFilesOperation::Override)
+                    ) && file.permissions.as_deref() == Some(permissions)
+                        && tokens.iter().all(|token| raw.contains(token)),
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn lldp_snapshot_script_is_valid_bash() {
+        let status = std::process::Command::new("bash")
+            .args(["-n", "-c", &lldp_snapshot_script()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn lldp_snapshot_timer_is_enabled_for_supported_flavors() {
+        check_cases(
+            [
+                Case {
+                    scenario: "BF3 enables the LLDP snapshot timer",
+                    input: default_flavor("ns", &None).unwrap(),
+                    expect: Yields(true),
+                },
+                Case {
+                    scenario: "BF4 generic enables the LLDP snapshot timer",
+                    input: flavor_bf4("ns", &None).unwrap(),
+                    expect: Yields(true),
+                },
+                Case {
+                    scenario: "BF4 Astra leaves systemd services unchanged",
+                    input: flavor_bf4_astra("ns", &None).unwrap(),
+                    expect: Yields(false),
+                },
+            ],
+            |flavor| {
+                Ok::<_, ()>(flavor.spec.systemd_services.is_some_and(|services| {
+                    services.iter().any(|service| {
+                        service.name == "nico-lldp-snapshot.timer"
+                            && matches!(
+                                service.operation,
+                                DpuFlavorSystemdServicesOperation::EnableAndStart
+                            )
+                    })
+                }))
+            },
         );
     }
 

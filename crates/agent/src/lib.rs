@@ -401,8 +401,8 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             println!("{}", serde_json::to_string_pretty(&health_report)?);
         }
 
-        Some(AgentCommand::LldpNeighbors) => {
-            let neighbors = carbide_host_support::lldp_collector::collect_lldp_neighbors()?;
+        Some(AgentCommand::LldpNeighbors(options)) => {
+            let neighbors = collect_lldp_neighbors(&options.agent_platform_type)?;
             println!("{neighbors:#?}");
         }
 
@@ -600,6 +600,20 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Collect LLDP neighbors from the source appropriate for this agent platform.
+pub fn collect_lldp_neighbors(
+    platform_type: &AgentPlatformType,
+) -> carbide_host_support::lldp_collector::LldpCollectorResult<
+    Vec<carbide_host_support::lldp_collector::LldpNeighbor>,
+> {
+    match platform_type {
+        AgentPlatformType::DpuOs => carbide_host_support::lldp_collector::collect_lldp_neighbors(),
+        AgentPlatformType::Containerized => {
+            carbide_host_support::lldp_collector::collect_lldp_neighbors_from_snapshot()
+        }
+    }
 }
 
 struct Registration {
