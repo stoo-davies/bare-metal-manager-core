@@ -425,11 +425,14 @@ function create_efi_boot_entry() {
 	fi
 
 	shim_arch=
+	boot_csv_name=
 	efi_arch=$(uname -m)
 	if [ "$efi_arch" == "x86_64" ]; then
 		shim_arch="x64"
+		boot_csv_name="BOOTX64.CSV"
 	elif [ "$efi_arch" == "aarch64" ]; then
 		shim_arch="aa64"
+		boot_csv_name="BOOTAA64.CSV"
 	else
 		echo "Unsupported arch $efi_arch for EFI boot entry creation" | tee $log_output
 		return 0
@@ -443,10 +446,17 @@ function create_efi_boot_entry() {
 	# reprovisioned over a different distro can hold more than one shim (e.g.
 	# a leftover EFI/dgx alongside the new EFI/ubuntu), and -print -quit
 	# would pick between them nondeterministically. Prefer the directory
-	# matching distro_name when it was supplied on the kernel cmdline.
-	shim_paths=$(find /mnt/boot/efi/EFI -mindepth 2 -maxdepth 2 -iname "shim${shim_arch}.efi" 2>/dev/null | sort)
+	# matching distro_name when it was supplied on the kernel cmdline. Only
+	# consider a shim when its directory has the matching boot hint CSV.
+	shim_paths=$(find /mnt/boot/efi/EFI -mindepth 2 -maxdepth 2 -iname "shim${shim_arch}.efi" 2>/dev/null | sort | while IFS= read -r candidate_shim; do
+		candidate_dir=$(dirname "$candidate_shim")
+		candidate_csv=$(find "$candidate_dir" -maxdepth 1 -type f -iname "$boot_csv_name" -print -quit 2>/dev/null)
+		if [ ! -z "$candidate_csv" ]; then
+			printf '%s\n' "$candidate_shim"
+		fi
+	done)
 	if [ -z "$shim_paths" ]; then
-		echo "No shim${shim_arch}.efi found under /mnt/boot/efi/EFI/*, skipping EFI boot entry creation" | tee $log_output
+		echo "No shim${shim_arch}.efi with a matching $boot_csv_name found under /mnt/boot/efi/EFI/*, skipping EFI boot entry creation" | tee $log_output
 		return 0
 	fi
 	shim_path=
@@ -471,7 +481,7 @@ function create_efi_boot_entry() {
 	# <optional args>,<description>, UTF-16 encoded), falling back to the
 	# ESP directory name.
 	label=
-	csv_file=$(find "$efi_dir" -maxdepth 1 -iname "*.csv" -print -quit 2>/dev/null)
+	csv_file=$(find "$efi_dir" -maxdepth 1 -type f -iname "$boot_csv_name" -print -quit 2>/dev/null)
 	if [ ! -z "$csv_file" ]; then
 		label=$(iconv -f UTF-16 -t UTF-8 "$csv_file" 2>/dev/null | tr -d '\r' | head -n1 | cut -d',' -f2)
 	fi
