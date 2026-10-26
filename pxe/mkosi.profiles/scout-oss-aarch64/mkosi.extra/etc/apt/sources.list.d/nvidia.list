@@ -1,1 +1,1 @@
-deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa /
+deb [signed-by=/usr/share/keyrings/nvidia-cuda-60df8a40.asc] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/sbsa /

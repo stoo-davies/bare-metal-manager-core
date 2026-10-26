@@ -26,3 +26,7 @@ rm -rf /usr/lib/firmware
 # Remove some large chunks of the modules tree.
 # They will be present in the secondary image that we load.
 rm -rf /usr/lib/modules/*/kernel/sound /usr/lib/modules/*/kernel/drivers/media /usr/lib/modules/*/kernel/drivers/net/wireless /usr/lib/modules/*/kernel/zfs
+
+# Mkosi already applied presets during the build; preserve that service enablement at boot.
+mkdir -p /etc/systemd/system-preset
+printf 'ignore *\n' >/etc/systemd/system-preset/00-scout-runtime.preset

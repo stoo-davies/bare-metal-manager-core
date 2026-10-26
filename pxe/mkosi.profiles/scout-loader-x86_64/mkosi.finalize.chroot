@@ -19,3 +19,10 @@ rm -rf /var/log/journal/*
 
 # Remove unnecessary kernel files
 rm -f /boot/System.map-* /boot/config-* /boot/vmlinu* /lib/modules/*/vmlinuz
+
+# Firmware is supplied by Scout after the loader switches to its rootfs.
+rm -rf /usr/lib/firmware
+
+# Mkosi already applied presets during the build; preserve that service enablement at boot.
+mkdir -p /etc/systemd/system-preset
+printf 'ignore *\n' >/etc/systemd/system-preset/00-scout-runtime.preset

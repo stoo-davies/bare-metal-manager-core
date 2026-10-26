@@ -21,7 +21,7 @@
 //! | :----- | :------- | :-------- |
 //! | `dpu/` | A BlueField DPU fetching its kickstart | `user-data` |
 //! | `tenant/` | An assigned instance's NoCloud datasource | `user-data`, `meta-data`, `vendor-data`, `network-config` |
-//! | `scout/` | A host booting the discovery OS | `user-data`, `meta-data` |
+//! | `scout/` | A host booting the discovery OS | `user-data`, `meta-data`; empty `vendor-data`, `network-config` |
 //!
 //! Separate prefixes rather than one set of routes that infers the caller,
 //! because a machine mid-transition can resolve to more than one consumer. The

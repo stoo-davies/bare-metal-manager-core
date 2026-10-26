@@ -295,6 +295,7 @@ dependencies = [
   "stage-scout-module-loader",
   "mkosi-build-scout-x86_64",
   "mkosi-build-scout-loader-x86_64",
+  "mkosi-check-scout-kernel",
   "mkosi-build-qcow-imager",
   "mkosi-copy-qcow-imager-to-webroot-x86_64",
   "mkosi-copy-scout-to-webroot-x86_64",
@@ -319,6 +320,7 @@ dependencies = [
   "stage-scout-module-loader",
   "mkosi-build-scout-x86_64",
   "mkosi-build-scout-loader-x86_64",
+  "mkosi-check-scout-kernel",
   "mkosi-build-qcow-imager",
   "mkosi-copy-qcow-imager-to-webroot-x86_64",
   "mkosi-copy-scout-to-webroot-x86_64",
@@ -342,6 +344,7 @@ dependencies = [
   "stage-scout-module-loader",
   "mkosi-build-scout-aarch64",
   "mkosi-build-scout-loader-aarch64",
+  "mkosi-check-scout-kernel",
   "mkosi-build-qcow-imager-aarch64",
   "mkosi-copy-scout-to-webroot-aarch64",
   "mkosi-copy-scout-loader-to-webroot-aarch64",
@@ -366,6 +369,7 @@ dependencies = [
   "stage-scout-module-loader",
   "mkosi-build-scout-aarch64",
   "mkosi-build-scout-loader-aarch64",
+  "mkosi-check-scout-kernel",
   "mkosi-build-qcow-imager-aarch64",
   "mkosi-copy-scout-to-webroot-aarch64",
   "mkosi-copy-scout-loader-to-webroot-aarch64",
@@ -589,6 +593,12 @@ args = [
   "-c",
   "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} ${MKOSI_STAGE}/scout-loader-aarch64 && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile scout-loader-aarch64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/scout-loader-aarch64 build",
 ]
+
+[tasks.mkosi-check-scout-kernel]
+category = "Ephemeral Image"
+description = "Checks that the loader kernel matches Scout's driver modules before publishing either image"
+command = "python3"
+args = ["${REPO_ROOT}/pxe/common_files/check-scout-kernel.py", "${MKOSI_BUILD_TMP}"]
 
 [tasks.mkosi-build-qcow-imager]
 category = "Ephemeral Image"

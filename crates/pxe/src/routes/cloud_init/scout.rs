@@ -293,8 +293,8 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
 }
 
 /// Builds the route table for the Scout discovery datasource served under
-/// `path_prefix`: `user-data` and `meta-data`. `vendor-data` is absent because
-/// NoCloud treats it as optional and this path has nothing to put in it.
+/// `path_prefix`. Return empty optional documents to avoid NoCloud retries
+/// on missing `vendor-data` and `network-config` endpoints.
 pub(crate) fn get_router(path_prefix: &str) -> Router<AppState> {
     Router::new()
         .route(
@@ -304,6 +304,14 @@ pub(crate) fn get_router(path_prefix: &str) -> Router<AppState> {
         .route(
             format!("{}/{}", path_prefix, "meta-data").as_str(),
             get(meta_data),
+        )
+        .route(
+            format!("{}/{}", path_prefix, "vendor-data").as_str(),
+            get(|| async {}),
+        )
+        .route(
+            format!("{}/{}", path_prefix, "network-config").as_str(),
+            get(|| async {}),
         )
 }
 

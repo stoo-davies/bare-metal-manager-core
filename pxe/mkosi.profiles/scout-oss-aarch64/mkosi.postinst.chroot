@@ -139,22 +139,33 @@ then
   exit 1
 fi
 
-# Check for key modules
-for mod in nvidia.ko.zst mlx5_ib.ko.zst
+# Check each installed kernel's headers and driver modules, regardless of compression.
+for kernel_dir in /usr/lib/modules/*
 do
-  if [ $(find /lib/modules -type f -name ${mod} | wc -l) == "0" ]
-  then
-    echo "ERROR: Missing module ${mod}, forge-scout will not inventory hardware correctly"
-    exit 1
-  fi
-done
-
-# Ensure we have header files for the installed kernel
-for kern_ver in $(ls -1 /usr/lib/modules)
-do
-  if [ ! -d /usr/src/linux-headers-${kern_ver} ]
+  kern_ver=${kernel_dir##*/}
+  if [ ! -d "/usr/src/linux-headers-${kern_ver}" ]
   then
     echo "ERROR: Kernel headers missing for kernel ${kern_ver}"
     exit 1
   fi
+
+  if ! grep -q '^CONFIG_ARM64_64K_PAGES=y$' "/boot/config-${kern_ver}"
+  then
+    echo "ERROR: Kernel ${kern_ver} does not use 64K pages"
+    exit 1
+  fi
+
+  for mod in nvidia mlx5_ib nvidia_fs
+  do
+    if ! vermagic=$(modinfo -k "${kern_ver}" -F vermagic "${mod}")
+    then
+      echo "ERROR: Missing module ${mod} for kernel ${kern_ver}"
+      exit 1
+    fi
+    if [ "${vermagic%% *}" != "${kern_ver}" ]
+    then
+      echo "ERROR: Module ${mod} does not match kernel ${kern_ver}: ${vermagic}"
+      exit 1
+    fi
+  done
 done
