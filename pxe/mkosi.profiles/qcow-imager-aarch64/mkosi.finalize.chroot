@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Restore the imager's previous firmware footprint.
+rm -rf /usr/lib/firmware

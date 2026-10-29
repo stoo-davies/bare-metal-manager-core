@@ -1,0 +1,12 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Restore the imager's previous firmware footprint, retaining CPU microcode
+# for mkosi to embed in the UKI.
+if [ -d /usr/lib/firmware ]; then
+  find /usr/lib/firmware -mindepth 1 -maxdepth 1 \
+    ! -name intel-ucode \
+    ! -name amd-ucode \
+    -exec rm -rf -- {} +
+fi
