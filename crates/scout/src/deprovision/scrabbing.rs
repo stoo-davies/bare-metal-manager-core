@@ -80,8 +80,8 @@ fn resolve_lenovo_mnv_cli_prog() -> Option<&'static str> {
 }
 
 lazy_static::lazy_static! {
-    static ref NVME_NS_RE: Regex = Regex::new(r".*:(0x[0-9]+)").unwrap();
-    static ref NVME_NSID_RE: Regex = Regex::new(r".*nsid:([0-9]+)").unwrap();
+    static ref NVME_NS_RE: Regex = Regex::new(r".*:\s*(0[xX][0-9A-Fa-f]+)\s*$").unwrap();
+    static ref NVME_NSID_RE: Regex = Regex::new(r".*nsid:\s*([0-9]+)").unwrap();
     static ref NVME_DEV_RE: Regex = Regex::new(r"/dev/nvme[0-9]+$").unwrap();
     static ref SD_DEV_RE: Regex = Regex::new(r"/dev/sd[a-z]+$").unwrap();
 }

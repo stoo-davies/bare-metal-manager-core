@@ -4,3 +4,7 @@ set -euo pipefail
 
 # Restore the imager's previous firmware footprint.
 rm -rf /usr/lib/firmware
+
+# Mkosi already applied presets during the build; preserve that service enablement at boot.
+mkdir -p /etc/systemd/system-preset
+printf 'ignore *\n' >/etc/systemd/system-preset/00-qcow-runtime.preset

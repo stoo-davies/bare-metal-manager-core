@@ -10,3 +10,7 @@ if [ -d /usr/lib/firmware ]; then
     ! -name amd-ucode \
     -exec rm -rf -- {} +
 fi
+
+# Mkosi already applied presets during the build; preserve that service enablement at boot.
+mkdir -p /etc/systemd/system-preset
+printf 'ignore *\n' >/etc/systemd/system-preset/00-qcow-runtime.preset
