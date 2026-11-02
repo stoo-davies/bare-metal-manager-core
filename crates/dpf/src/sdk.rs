@@ -17,6 +17,7 @@
 
 //! DPF SDK - High-level interface for DPF operations.
 
+mod bmc_credentials;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
@@ -24,6 +25,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub use bmc_credentials::{
+    BmcCredentialFailureReason, BmcCredentialHealth, BmcCredentialObservation,
+    bmc_credential_secret_name,
+};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::core::ObjectMeta;
@@ -896,6 +901,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         dhcp_acl_interfaces,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
+        !config.partial_multiplane_disabled,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
@@ -3339,6 +3345,35 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         info: DpuDeviceInfo,
         astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
     ) -> Result<(), DpfError> {
+        self.register_dpu_device_internal(info, astra_provisioning_inputs, None)
+            .await
+    }
+
+    /// Create a DPUDevice with its per-device credential reference already set.
+    ///
+    /// The Secret must have been created in this SDK's namespace first. Existing devices are
+    /// never switched to a different credential by registration; a mismatched reference is an error.
+    pub async fn register_dpu_device_with_credential(
+        &self,
+        info: DpuDeviceInfo,
+        astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
+        secret_name: &str,
+    ) -> Result<(), DpfError> {
+        bmc_credentials::validate_per_device_secret_name(secret_name)?;
+        self.register_dpu_device_internal(
+            info,
+            astra_provisioning_inputs,
+            Some(secret_name.to_string()),
+        )
+        .await
+    }
+
+    async fn register_dpu_device_internal(
+        &self,
+        info: DpuDeviceInfo,
+        astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
+        credential_secret_name: Option<String>,
+    ) -> Result<(), DpfError> {
         let cr_name = dpu_device_cr_name(&info.device_id);
         let expected_machine = astra_provisioning_inputs.map(|(machine, _)| machine);
         let astra_underlay_inputs = astra_provisioning_inputs.map(|(machine, prefixes)| {
@@ -3357,6 +3392,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
         {
+            bmc_credentials::check_registration_credential(
+                &existing,
+                credential_secret_name.as_deref(),
+            )?;
             if existing.metadata.deletion_timestamp.is_some() {
                 return Err(DpfError::InvalidState(format!(
                     "DPUDevice {cr_name} is being deleted (has deletionTimestamp); \
@@ -3381,7 +3420,9 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             return Ok(());
         }
 
-        if !self.shared_bmc_password_ready.load(Ordering::Acquire) {
+        if credential_secret_name.is_none()
+            && !self.shared_bmc_password_ready.load(Ordering::Acquire)
+        {
             return Err(DpfError::BmcPasswordSourceUnavailable(
                 "cannot register a DPUDevice until the shared BMC credential has been accepted and published"
                     .to_string(),
@@ -3429,7 +3470,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 pf0_name: None,
                 psid: None,
                 serial_number: info.serial_number,
-                bmc_credential_secret_name: None,
+                bmc_credential_secret_name: credential_secret_name.clone(),
                 cluster: None,
                 nic_device_count: None,
                 values,
@@ -3451,6 +3492,14 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             {
                 let existing =
                     DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?;
+                if let Some(existing) = &existing {
+                    bmc_credentials::check_registration_credential(
+                        existing,
+                        credential_secret_name.as_deref(),
+                    )?;
+                } else if credential_secret_name.is_some() {
+                    return Err(DpfError::not_found("DPUDevice", &cr_name));
+                }
                 if existing
                     .as_ref()
                     .is_some_and(|d| d.metadata.deletion_timestamp.is_some())
@@ -3825,7 +3874,11 @@ impl DpuPhaseObservation {
                 "DPU {cr_name} has no status"
             )));
         };
-        let phase = DpuPhase::from(status.phase.clone());
+        let phase = status
+            .phase
+            .clone()
+            .ok_or_else(|| DpfError::InvalidState(format!("DPU {cr_name} has no status phase")))?;
+        let phase = DpuPhase::from(phase);
         let failure = (phase == DpuPhase::Error).then(|| DpuFailureObservation {
             name: dpu.metadata.name,
             namespace: dpu.metadata.namespace,
@@ -3870,7 +3923,8 @@ impl<R: DpuRepository, L> DpfSdk<R, L> {
     /// A deletion timestamp returns `Deleting` without failure details, even
     /// when status is absent or still reports `Error`. Otherwise, only `Error`
     /// includes failure details. A missing CR returns `NotFound`, and
-    /// a CR with neither a deletion timestamp nor status returns `InvalidState`.
+    /// a CR without a deletion timestamp requires both status and its phase,
+    /// otherwise it returns `InvalidState`.
     /// Resource read errors are propagated; deployment ownership is not checked.
     pub async fn get_dpu_phase_observation(
         &self,
@@ -3950,7 +4004,7 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
     ///
     /// `None` means the deployment has not reported `DPUSetsReconciled=True`
     /// for its current generation, or a requested DPU is missing, is being
-    /// deleted, belongs to another deployment, or has no status. Duplicate
+    /// deleted, belongs to another deployment, or has no status or phase. Duplicate
     /// device IDs also return `None`. No partial map is returned, including
     /// when an observed DPU reports `Error`. Empty input returns an empty map
     /// after deployment checks, without reading any DPUs.
@@ -4002,7 +4056,10 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
             let Some(status) = dpu.status.as_ref() else {
                 return Ok(None);
             };
-            let phase = DpuPhase::from(status.phase.clone());
+            let Some(phase) = status.phase.clone() else {
+                return Ok(None);
+            };
+            let phase = DpuPhase::from(phase);
             if phase == DpuPhase::Ready {
                 match dpu_comparison(&self.namespace, &dpu, &deployment) {
                     DpuComparison::Match => {}
@@ -4641,7 +4698,11 @@ impl<R: DpuNodeRepository + DpuDeviceRepository + DpuRepository, L> DpfSdk<R, L>
                     spec_dpu_flavor: Some(d.spec.dpu_flavor.clone()),
                     spec_dpu_device_name: d.spec.dpu_device_name.clone(),
                     spec_dpu_node_name: d.spec.dpu_node_name.clone(),
-                    status_phase: d.status.as_ref().map(|s| format!("{:?}", s.phase)),
+                    status_phase: d
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_ref())
+                        .map(|phase| format!("{phase:?}")),
                     status_bfb_file: d.status.as_ref().and_then(|s| s.bfb_file.clone()),
                     status_conditions: d.status.as_ref().and_then(|s| s.conditions.clone()),
                     status_operational_conditions: d
@@ -8202,7 +8263,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Ready,
+                phase: Some(DpuStatusPhase::Ready),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8347,7 +8410,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Error,
+                phase: Some(DpuStatusPhase::Error),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8393,7 +8458,7 @@ mod tests {
                 let mock = &mock;
                 let sdk = &sdk;
                 async move {
-                    dpu.status.as_mut().expect("DPU status").phase = stale_phase;
+                    dpu.status.as_mut().expect("DPU status").phase = Some(stale_phase);
                     mock.dpus
                         .write()
                         .unwrap()

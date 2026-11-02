@@ -114,10 +114,12 @@ pub mod vpc_dpu_loopback;
 pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
+mod writable_pool;
 
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
+pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -976,6 +978,18 @@ impl WithTransaction for PgPool {
     }
 }
 
+/// Makes the current transaction one repeatable-read, read-only snapshot, so
+/// every later statement reads the same committed data. It must be the first
+/// statement of the transaction.
+pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), DatabaseError> {
+    let query = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
 pub trait TransactionVending {
     fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>>;
 }
@@ -1035,6 +1049,21 @@ mod tests {
                 .is_retryable_transaction_error()
         );
         Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn read_only_snapshot_rejects_writes(pool: PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        set_read_only_snapshot(&mut txn).await.unwrap();
+        let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
+            .execute(&mut *txn)
+            .await
+            .expect_err("a read-only transaction rejects writes");
+        // read_only_sql_transaction
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("25006")
+        );
     }
 
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =

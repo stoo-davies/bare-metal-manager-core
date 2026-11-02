@@ -104,9 +104,12 @@ means something is blocking normal lifecycle progression and warrants investigat
 Common causes include BMC connectivity issues, PXE boot failures or external service
 timeouts.
 
-Related metrics include `carbide_<object>_per_state` (current count per state),
-`carbide_<object>_state_time_in_state_seconds` (histogram of time spent) and
-`carbide_<object>_state_handler_errors_total` (processing failures).
+Related metrics include:
+
+- `carbide_<object>_per_state` - current count per state
+- `carbide_<object>_time_in_state_seconds` - histogram of elapsed seconds in state
+- `carbide_<object>_with_state_handling_errors_per_state` - gauge of objects with error,
+grouped by state, substate and error name
 
 ### Capacity: "How much headroom do we have?"
 
@@ -655,8 +658,12 @@ control plane health and performance metrics:
 **Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
 indicators for SLO monitoring.
 
-**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
-which endpoints are slow or failing.
+**Requests by method and status** - Stacked time series of requests per second, grouped
+by gRPC method and status code. Shows traffic volume and error responses by method.
+
+**Request latency** - The summary p95 and the p50/p95/p99 latency time series aggregate
+requests across all methods matching the selected job filter; they do not show
+per-method latency.
 
 **Database** - Queries per second, time per request, connection pool utilization. Database
 contention is a common cause of API slowdowns.

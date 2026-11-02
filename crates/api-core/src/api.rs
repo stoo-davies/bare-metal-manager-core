@@ -270,6 +270,20 @@ impl Forge for Api {
         crate::handlers::vpc::find_by_ids(self, request).await
     }
 
+    async fn find_routing_profile_names(
+        &self,
+        request: Request<rpc::RoutingProfileSearchFilter>,
+    ) -> Result<Response<rpc::RoutingProfileNameList>, Status> {
+        crate::handlers::routing_profile::find_names(self, request)
+    }
+
+    async fn find_routing_profiles_by_names(
+        &self,
+        request: Request<rpc::RoutingProfilesByNamesRequest>,
+    ) -> Result<Response<rpc::NamedRoutingProfileList>, Status> {
+        crate::handlers::routing_profile::find_by_names(self, request)
+    }
+
     async fn get_vpc_routing_state(
         &self,
         request: Request<rpc::VpcRoutingStateRequest>,
@@ -414,6 +428,20 @@ impl Forge for Api {
         request: Request<rpc::SpxPartitionsByIdsRequest>,
     ) -> Result<Response<rpc::SpxPartitionList>, Status> {
         crate::handlers::spx_partition::find_by_ids(self, request).await
+    }
+
+    async fn get_machine_spx_multiplane(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::get(self, request).await
+    }
+
+    async fn update_machine_spx_multiplane_maintenance(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneMaintenanceUpdateRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::update(self, request).await
     }
 
     async fn find_ib_partition_ids(
@@ -1027,6 +1055,13 @@ impl Forge for Api {
         request: Request<::rpc::forge::MachinesByIdsRequest>,
     ) -> Result<Response<::rpc::MachineList>, Status> {
         crate::handlers::machine::find_machines_by_ids(self, request).await
+    }
+
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
     }
 
     async fn find_machine_state_histories(
@@ -3231,6 +3266,13 @@ impl Forge for Api {
 
     async fn replace_sku(&self, request: Request<rpc::Sku>) -> Result<Response<rpc::Sku>, Status> {
         crate::handlers::sku::replace_sku(self, request).await
+    }
+
+    async fn replace_sku_components(
+        &self,
+        request: Request<rpc::ReplaceSkuComponentsRequest>,
+    ) -> Result<Response<rpc::Sku>, Status> {
+        crate::handlers::sku::replace_sku_components(self, request).await
     }
 
     async fn set_managed_host_quarantine_state(
