@@ -191,6 +191,9 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The Redfish service root as the BMC reported it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_root: Option<ServiceRoot>,
     /// The class [`derive_hardware_class`] derived from what the BMC reported.
     /// `None` if no exploration has recorded one for this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,11 +643,19 @@ pub enum PreingestionState {
     BfbRecoveryNeeded {
         reason: String,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         #[serde(default)]
         pre_copy_powercycle: bool,
     },
     BfbPlatformPowercycle {
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         phase: BfbPlatformPowercyclePhase,
         #[serde(default)]
         post_install: bool,
@@ -652,10 +663,18 @@ pub enum PreingestionState {
     BfbCopyInProgress {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     BfbInstallationWait {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     InitialReset {
         phase: InitialResetPhase,
@@ -731,6 +750,18 @@ pub enum PreingestionState {
 }
 
 impl PreingestionState {
+    /// DPU BMC identity retained across BFB recovery phases and worker restarts.
+    /// `None` denotes a legacy unbound recovery or a state outside BFB recovery.
+    pub fn bfb_target_mac(&self) -> Option<MacAddress> {
+        match self {
+            Self::BfbRecoveryNeeded { dpu_bmc_mac, .. }
+            | Self::BfbPlatformPowercycle { dpu_bmc_mac, .. }
+            | Self::BfbCopyInProgress { dpu_bmc_mac, .. }
+            | Self::BfbInstallationWait { dpu_bmc_mac, .. } => *dpu_bmc_mac,
+            _ => None,
+        }
+    }
+
     /// Whether a `waiting_for_explorer_refresh` set in this state is a
     /// preingestion park that only a fresh exploration report can end. These
     /// are the states whose next step reads the report: the post-reset
@@ -1866,6 +1897,8 @@ pub struct ComputerSystem {
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<String>,
 }
 
 /// Minimal processor inventory with position normalized by the explorer.
@@ -1931,6 +1964,19 @@ pub enum PowerState {
     Unknown,
 }
 
+/// The Redfish `ServiceRoot` fields that identify a BMC.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ServiceRoot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// Keys of the `Oem` object, for example `Ami` or `Dell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oem_keys: Vec<String>,
+}
+
 /// `Manager` definition. Matches redfish definition
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -1940,6 +1986,10 @@ pub struct Manager {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipmi_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_version: Option<String>,
 }
 
 /// `EthernetInterface` definition. Matches redfish definition
@@ -2968,6 +3018,49 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    #[test]
+    fn bfb_target_identity_survives_serialization() {
+        let mac: MacAddress = "02:00:00:00:84:76".parse().unwrap();
+        let cases = [
+            ("bfbrecoveryneeded", serde_json::json!({"reason": "test"})),
+            (
+                "bfbplatformpowercycle",
+                serde_json::json!({"phase": "poweroff"}),
+            ),
+            (
+                "bfbcopyinprogress",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+            (
+                "bfbinstallationwait",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+        ]
+        .into_iter()
+        .map(|(state, extra)| Check {
+            scenario: state,
+            input: (state, extra),
+            expect: (None, Some(mac), true),
+        });
+        check_values(cases, |(state, extra)| {
+            let mut stored = serde_json::json!({"state": state, "host_bmc_ip": "192.0.2.200"});
+            stored
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let legacy: PreingestionState = serde_json::from_value(stored.clone()).unwrap();
+            stored["dpu_bmc_mac"] = serde_json::to_value(mac).unwrap();
+            let pinned: PreingestionState = serde_json::from_value(stored).unwrap();
+            let restored: PreingestionState =
+                serde_json::from_str(&serde_json::to_string(&pinned).unwrap()).unwrap();
+            (
+                legacy.bfb_target_mac(),
+                restored.bfb_target_mac(),
+                restored == pinned,
+            )
+        });
+    }
 
     /// Stored reports written before inventory entries carried drive data
     /// still load, and the drive data round-trips.
@@ -4718,6 +4811,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4737,6 +4832,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4882,6 +4978,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4901,6 +4999,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),

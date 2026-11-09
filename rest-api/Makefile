@@ -30,6 +30,8 @@ REST_IMAGES := nico-rest-api nico-rest-workflow nico-rest-site-manager \
 	nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow \
 	nico-psm nico-nsm nico-mcp
 
+TEST_PACKAGES ?= ./...
+
 # PostgreSQL container configuration
 POSTGRES_CONTAINER_NAME := project-test
 POSTGRES_PORT := 30432
@@ -52,7 +54,8 @@ HELM_SET_KEYCLOAK := --set nico-rest-api.config.keycloak.enabled=true \
 	--set nico-rest-api.config.keycloak.externalBaseURL=http://localhost:8082 \
 	--set nico-rest-api.config.keycloak.realm=nico-dev \
 	--set nico-rest-api.config.keycloak.clientID=nico-api \
-	--set nico-rest-api.config.keycloak.serviceAccount=true
+	--set nico-rest-api.config.keycloak.serviceAccount=true \
+	--set nico-rest-api.config.keycloak.serviceAccountOrgs={test-org}
 
 # Point the DB-connecting sub-charts at the standalone `postgres.postgres`
 # StatefulSet that kind-reset-infra deploys (deploy/kustomize/base/postgres/).
@@ -273,6 +276,10 @@ test-nvswitch-manager:
 test-sdk-simple:
 	go test ./sdk/simple -count=1
 
+.PHONY: test-sdk-standard
+test-sdk-standard:
+	cd sdk/standard && go test -p 1 $(TEST_PACKAGES) -count=1
+
 test-mcp:
 	cd mcp && go test -p 1 ./... -count=1
 
@@ -283,7 +290,7 @@ build:
 	go mod download
 	cd api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/api ./cmd/api
 	cd workflow && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/workflow ./cmd/workflow
-	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/sitemgr ./cmd/sitemgr
+	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-manager ./cmd/site-manager
 	cd site-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-agent ./cmd/site-agent
 	cd db && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/migrations ./cmd/migrations
 	cd cert-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/credsmgr ./cmd/credsmgr
