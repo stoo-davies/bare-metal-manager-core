@@ -22,7 +22,6 @@ async fn create_domain(env: &TestEnv, name: &str) -> DomainId {
         .create_domain(Request::new(CreateDomainRequest {
             name: name.to_string(),
             default_ttl: None,
-            vpc_id: None,
         }))
         .await
         .unwrap()
@@ -53,6 +52,7 @@ fn network_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: domain_id,
         vpc_id: None,
@@ -245,7 +245,6 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .create_domain(Request::new(CreateDomainRequest {
             name: domain_name.clone(),
             default_ttl: None,
-            vpc_id: None,
         }))
         .await
         .unwrap_err();
@@ -344,6 +343,7 @@ async fn create_addressed_interface(
         svi_ip: None,
         free_ip_count_v2: None,
         free_ip_count_saturated: false,
+        dhcpv6_link_address: None,
     });
     env.api
         .create_network_segment(Request::new(request))
