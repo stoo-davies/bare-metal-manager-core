@@ -42,9 +42,11 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
+      Site fabric IP Blocks are created automatically from the Site's configured address ranges; Providers do not need to create them manually. A compatible existing IP Block can be reused, including one created manually or renamed. Its name and description are preserved. A range wholly inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block; other ranges get `Public`.
 
-      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+      Removing a configured range moves its IP Block to `Deleting`, which prevents new Allocations and changes to allocation size. The IP Block is removed once it is no longer in use. Renaming it does not prevent this. Restoring the same configured range can restore the original IP Block. An overlapping replacement range becomes available after the old IP Block is removed.
+
+      If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through the [Delete IP Block endpoint](#tag/IP-Block/operation/delete-ipblock). An IP Block still managed by the Site configuration returns 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
       To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
@@ -2100,16 +2102,16 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of an `OperatorManaged` SitePrefix.
+          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of the source site-level IP Block.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready'
+                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready'
                     data: null
       description: |-
         Create an Allocation for the org.
@@ -2117,7 +2119,7 @@ paths:
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
+        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. The source IP Block must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
       requestBody:
         content:
           application/json:
@@ -2366,10 +2368,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
+                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready"
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
@@ -2382,7 +2384,7 @@ paths:
 
         For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. The source site-level IP Block must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
 
         Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
       requestBody:
@@ -2581,7 +2583,7 @@ paths:
 
         Tenant IP Blocks are created via Allocation.
 
-        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
+        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Concurrent changes to Site fabric IP Blocks can also return 409. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2713,25 +2715,25 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          description: The IP Block is managed by the Site configuration. Remove its configured address range instead.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                core-linked-site-prefix:
+                site-managed-ip-block:
                   value:
                     source: nico
-                    message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
+                    message: This IP Block is managed by the Site configuration. Remove its configured address range instead
                     data: null
       description: |-
         Delete an IP block
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
-        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+        For an automatically managed Site fabric IP Block, remove its address range from the Site configuration. The IP Block is removed once it is no longer in use. If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through this endpoint. Blocks still managed by the Site configuration return 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric IP Block managed by the Site configuration cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2776,7 +2778,7 @@ paths:
 
         Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
 
-        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
+        The name and description of a Site fabric IP Block are preserved across Site updates. Renaming it does not prevent automatic deletion when its configured address range is removed.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:
@@ -12638,7 +12640,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '412':
-          description: The Machine cannot be decommissioned in its current Core state or its DPUs do not support the required BFB installation.
+          description: The Machine is assigned to an Instance, is not in the required Core state, or its DPUs do not support the required BFB installation.
           content:
             application/json:
               schema:
@@ -12659,7 +12661,8 @@ paths:
                 $ref: '#/components/schemas/NICoAPIError'
       operationId: decommission-machine
       description: |-
-        Start decommissioning a Machine. The Machine must be in Core's `Ready`
+        Start decommissioning a Machine that is not assigned to an Instance.
+        The Machine must be in Core's `Ready`
         state, and every attached DPU must support BFB installation through
         Redfish. The operation is asynchronous; use the Machine status to
         observe workflow progress.
@@ -14625,7 +14628,7 @@ paths:
                 nvswitch:
                   summary: NVSwitch tray
                   value:
-                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                       type: NVSwitch
                       name: rack-01-nvswitch-01
                       manufacturer: NVIDIA
@@ -16275,7 +16278,7 @@ paths:
                   summary: NVSwitch tray
                   description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
                   value:
-                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                     type: NVSwitch
                     name: rack-01-nvswitch-01
                     manufacturer: NVIDIA
@@ -16431,6 +16434,100 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  '/v2/org/{org}/nico/tray/{id}/decommission':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: Core inventory component ID of the Tray, not an expected-inventory or Flow component ID.
+        schema:
+          type: string
+    post:
+      summary: Decommission a Tray
+      operationId: decommission-tray
+      tags:
+        - Tray
+      description: |-
+        Start decommissioning a managed Tray in the specified Site's Core inventory.
+        The component type is derived from its Core ID: `fm100` identifies a
+        `Compute` Tray (managed host), `sw100` identifies an `NVSwitch`, and
+        `ps100` identifies a `PowerShelf`. An unsupported ID namespace returns
+        400; an absent component returns 404.
+
+        You must be a Provider Admin in the Org that owns the Site, and the Site
+        must be Registered. Core requires the component to be `Ready`.
+        For `Compute`, the host must not be assigned to an Instance, and every attached DPU must
+        support BFB installation through Redfish. For `NVSwitch` and `PowerShelf`,
+        no managed host in the component's rack may be assigned to an instance.
+        `NVSwitch` also requires Core's RMS component-manager backend.
+        Failed preconditions return 412.
+
+        Decommissioning a `Compute` Tray deconfigures the host and attached DPUs,
+        factory-resets their BMCs, and deletes managed credentials. For `NVSwitch`, it factory-resets NVOS and the BMC and deletes
+        the managed NVOS and BMC credentials. For `PowerShelf`, it factory-resets
+        the BMC and deletes its managed BMC credentials.
+
+        A 202 response confirms acceptance, not completion. For `Compute`, use
+        Machine status to observe workflow progress. For `NVSwitch` and
+        `PowerShelf`, inspect the Core controller state; the terminal success
+        state is `decommissioning` with substate `decommissioned`. This endpoint
+        returns no Flow Task or component progress.
+        Requests are not retried automatically. After a timeout, the result is
+        unknown; Core can still be processing the request. Repeating the request
+        after Core leaves `Ready` returns 412.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrayDecommissionRequest'
+      responses:
+        '202':
+          description: Tray decommissioning request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Tray decommissioning request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Core rejected the component's state, rack assignments, or backend configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core deployment does not implement this operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '503':
+          description: Core is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Core proxy request timed out; the operation may still be running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
   '/v2/org/{org}/nico/tray/{id}/health-report':
     parameters:
       - schema:
@@ -19074,20 +19171,21 @@ paths:
       tags: [Tray]
       operationId: factory-reset-tray
       summary: Restore factory defaults on a switch tray
-      description: >-
-        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
-        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
-        target `sdn` restores their SDN configuration to factory defaults.
-        Only ingested switches are supported. Domain targets expand to their switch members.
-        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
-        Returns task IDs, one per owning rack; submission does not imply reset completion.
-        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
-        Completion means Core reports reset completed, not that the Domain is operational.
-        NICo does not automatically restore configuration or re-ingest devices in this operation.
-        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
-        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
-        inspect existing tasks and hardware before submitting again. Core status observes the latest
-        recorded device/action reference; another out-of-band reset can replace that reference.
+      description: |-
+        Restores factory defaults on a switch tray. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switch.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Only an ingested switch can be reset. The request returns `409` if a conflicting task is Pending or Running on the switch's rack. The reset task fails without resetting the switch if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns the reset task ID in `taskIds`; it means the task was created, not that the switch accepted or completed the reset. Use the Task APIs to see whether the task completed, failed, or was terminated. If the task fails before any reset is submitted, read the task message for the reason. When available, the task report provides additional details. A completed task means the Site reported the reset as finished, not that the switch is back in service. NICo does not restore the switch configuration or re-ingest the switch afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switch before submitting again, since the first reset may already be running. Avoid starting another reset of the same type on the switch outside this API while its task is running, as the task may report that reset's outcome instead.
       security:
         - JWTBearerToken: []
       parameters:
@@ -19151,20 +19249,21 @@ paths:
       tags: [Domain]
       operationId: factory-reset-nvlink-domain
       summary: Restore factory defaults on an NVLink Domain’s switches
-      description: >-
-        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
-        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
-        target `sdn` restores their SDN configuration to factory defaults.
-        Only ingested switches are supported. Domain targets expand to their switch members.
-        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
-        Returns task IDs, one per owning rack; submission does not imply reset completion.
-        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
-        Completion means Core reports reset completed, not that the Domain is operational.
-        NICo does not automatically restore configuration or re-ingest devices in this operation.
-        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
-        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
-        inspect existing tasks and hardware before submitting again. Core status observes the latest
-        recorded device/action reference; another out-of-band reset can replace that reference.
+      description: |-
+        Restores factory defaults on every switch in an NVLink Domain. Only Provider Admins can call this endpoint. The Site must be Registered and belong to the current organization's provider.
+
+        `target` is required, case-sensitive, and has no default:
+
+        - `nvos` clears the NVOS configuration and reboots the switches.
+        - `sdn` restores the SDN configuration to factory defaults.
+
+        Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. A rack's task fails without resetting any of its switches if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. If a host goes into use while the task is running, remaining switches whose resets have not been submitted are skipped and the task fails. Resets already accepted may still complete. This check cannot be overridden.
+
+        The reset runs in the background. A `202` response returns one task ID for each rack the Domain's switches belong to, in no particular order. It means the tasks were created, not that the switches accepted or completed the resets. Use the Task APIs to see whether each task completed, failed, or was terminated. If a rack's task fails before any reset is submitted, read its task message for the reason. When available, its task report provides additional details. A completed task means the Site reported the resets as finished, not that the Domain is operational. NICo does not restore the switch configurations or re-ingest the switches afterwards.
+
+        If the Site does not support the selected reset, the task fails.
+
+        Failed or uncertain reset submissions are not retried automatically. After a timeout or a lost response, check existing tasks and the switches before submitting again, since resets may already be running. Avoid starting another reset of the same type on these switches outside this API while their tasks are running, as a task may report that reset's outcome instead.
       security:
         - JWTBearerToken: []
       parameters:
@@ -19227,6 +19326,19 @@ paths:
 
 components:
   schemas:
+    TrayDecommissionRequest:
+      title: TrayDecommissionRequest
+      type: object
+      description: Site containing the managed Tray to decommission in Core inventory.
+      examples:
+        - siteId: 11111111-1111-4111-8111-111111111111
+      required:
+        - siteId
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site that owns the Tray. The Site must be in Registered status and owned by the requesting provider org.
     FactoryResetRequest:
       type: object
       example:
@@ -27752,7 +27864,7 @@ components:
             observedAt: '2026-09-28T12:00:00Z'
             successes: []
             alerts: []
-        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+        - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
           type: NVSwitch
           name: rack-01-nvswitch-01
           manufacturer: NVIDIA
@@ -28800,6 +28912,7 @@ components:
           - PowerOff
           - Reset
           - ChassisReset
+          - AcPowercycle
           - Unknown
         requested:
           type:
@@ -29212,6 +29325,56 @@ components:
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
+        targets:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            enum:
+              - bmc
+              - cpld
+              - bios
+              - nvos
+              - pmc
+              - psu
+              - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
+          description: |-
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
+
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -29243,6 +29406,12 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+      examples:
+        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          filter:
+            names: [rack-1]
+          ruleId: 64d2028c-ae87-4069-a624-66089d957ef9
+          targets: [bmc]
     BringUpRackRequest:
       title: BringUpRackRequest
       type: object
@@ -30473,31 +30642,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within each matched tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on each matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -30719,31 +30900,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within the targeted tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on the matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -32880,7 +33073,7 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC
         shelfSerialNumber:
           type: string
@@ -33021,7 +33214,7 @@ components:
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         shelfSerialNumber:
           type:

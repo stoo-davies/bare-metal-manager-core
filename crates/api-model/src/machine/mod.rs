@@ -2291,9 +2291,11 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Absolute deadline; the API declares failure past this time.
-        /// Derived from scout's execution/download timeouts plus slack.
+        /// Completion deadline, shifted once by the delivery wait inferred from Scout contact.
         deadline: DateTime<Utc>,
+        /// Scout contact used to infer delivery; absent until delivery is recorded.
+        #[serde(default)]
+        delivered_at: Option<DateTime<Utc>>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
@@ -2980,8 +2982,25 @@ pub enum MachineMaintenanceOperation {
     },
     /// Gracefully reboot the host without falling back to a forced restart.
     Reboot,
+    /// AC power cycle the compute tray through its configured backend.
+    AcPowercycle {
+        #[serde(default)]
+        state: AcPowercycleState,
+    },
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
+}
+
+/// Durable AC-cycle progress. Once command success is persisted, retry NIC
+/// restoration without another cycle. Vera Rubin hosts use the ingestion sequence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "lowercase")]
+pub enum AcPowercycleState {
+    /// Determine NIC restoration eligibility, then submit the AC power-cycle command.
+    #[default]
+    PowerCycle,
+    /// Restore onboard NIC configuration after a Vera Rubin AC cycle.
+    DisableOnboardNics { state: DisableOnboardNicsState },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4119,6 +4138,31 @@ mod tests {
         dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn scout_upgrade_state_without_delivery_timestamp_remains_readable() {
+        let fixture = r#"{"waitingforscoutupgrade":{
+            "upgrade_task_id":"legacy-task","firmware_type":"bmc",
+            "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
+            "deadline":"2026-10-28T13:00:00Z","task_json":"{}","result":null
+        }}"#;
+        let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
+        let HostReprovisionState::WaitingForScoutUpgrade {
+            delivered_at,
+            deadline,
+            ..
+        } = &state
+        else {
+            panic!("unexpected state")
+        };
+        assert!(delivered_at.is_none());
+        assert_eq!(
+            *deadline,
+            "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let roundtrip: HostReprovisionState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(roundtrip, state);
+    }
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,

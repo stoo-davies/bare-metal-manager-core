@@ -18,8 +18,9 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use carbide_instrument::{emit, initialize_counter_series};
+use carbide_instrument::Instrumentation;
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::Meter;
 use prometheus::{Counter, CounterVec, Opts};
 
 use super::dedup_queue::{DedupQueue, SaveOutcome};
@@ -67,6 +68,7 @@ pub(crate) struct OtlpMetricQueueKey {
 
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) struct OtlpSink {
+    instrumentation: Instrumentation,
     queue: Arc<OtlpQueue>,
     metrics_queue: Arc<OtlpMetricsQueue>,
     replaced_total: Counter,
@@ -78,6 +80,7 @@ pub(crate) struct OtlpSink {
 
 #[cfg(feature = "bench-hooks")]
 pub struct OtlpSink {
+    instrumentation: Instrumentation,
     queue: Arc<OtlpQueue>,
     metrics_queue: Arc<OtlpMetricsQueue>,
     replaced_total: Counter,
@@ -118,6 +121,8 @@ impl OtlpSink {
     ///
     /// The returned order matches `configs`. Each sink starts separate log and
     /// metric drain tasks. Queue metrics identify the configured endpoint.
+    /// Retain both the meter and instrumentation providers until the sinks,
+    /// drains, and metric scrapes finish.
     ///
     /// # Errors
     ///
@@ -128,6 +133,8 @@ impl OtlpSink {
         mapper: Arc<dyn RedfishEventMapper>,
         metrics_manager: &MetricsManager,
         prefix: &str,
+        meter: &Meter,
+        instrumentation: &Instrumentation,
     ) -> Result<Vec<Self>, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             HealthError::GenericError(format!("otlp sink requires active tokio runtime: {e}"))
@@ -170,14 +177,14 @@ impl OtlpSink {
             let target = ConfiguredOtlpTarget(config.endpoint.clone());
 
             for signal in [OtlpSignal::Logs, OtlpSignal::Metrics] {
-                let initialized = initialize_counter_series(&OtlpRecordAccepted {
+                let initialized = instrumentation.initialize_counter_series(&OtlpRecordAccepted {
                     target: target.clone(),
                     signal,
                 });
 
                 debug_assert!(initialized, "OTLP ingress Event must be a counter");
 
-                let initialized = initialize_counter_series(&OtlpRecordsExported {
+                let initialized = instrumentation.initialize_counter_series(&OtlpRecordsExported {
                     target: target.clone(),
                     signal,
                 });
@@ -191,7 +198,7 @@ impl OtlpSink {
             let metrics_replaced_total =
                 metrics_replaced_total.get_metric_with_label_values(&[&config.endpoint])?;
 
-            let drain = OtlpDrainTask::new(queue.clone(), config.clone());
+            let drain = OtlpDrainTask::new(queue.clone(), config.clone(), instrumentation.clone());
             handle.spawn(drain.run());
 
             // Each target and signal owns a drain so a slow collector cannot
@@ -200,11 +207,13 @@ impl OtlpSink {
                 metrics_queue.clone(),
                 config.clone(),
                 prefix.to_string(),
+                instrumentation.clone(),
             );
 
             handle.spawn(metrics_drain.run());
 
             sinks.push(Self {
+                instrumentation: instrumentation.clone(),
                 queue,
                 metrics_queue,
                 replaced_total,
@@ -215,14 +224,14 @@ impl OtlpSink {
             });
         }
 
-        register_queue_depth_metric(&sinks);
+        register_queue_depth_metric(meter, &sinks);
 
         Ok(sinks)
     }
 
     /// Records the observable result of one log or metric queue insertion.
     fn record_save_outcome(&self, outcome: SaveOutcome, signal: OtlpSignal) {
-        emit(OtlpRecordAccepted {
+        self.instrumentation.emit(OtlpRecordAccepted {
             target: self.target.clone(),
             signal,
         });
@@ -233,7 +242,7 @@ impl OtlpSink {
                 OtlpSignal::Logs => self.replaced_total.inc(),
                 OtlpSignal::Metrics => self.metrics_replaced_total.inc(),
             },
-            SaveOutcome::DroppedOldest => emit(OtlpQueueEntryDropped {
+            SaveOutcome::DroppedOldest => self.instrumentation.emit(OtlpQueueEntryDropped {
                 target: self.target.clone(),
                 signal,
             }),
@@ -275,6 +284,7 @@ impl OtlpSink {
         };
 
         Self {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             queue: Arc::new(DedupQueue::bounded(capacity)),
             metrics_queue: Arc::new(DedupQueue::bounded(capacity)),
             replaced_total: Counter::new("bench_replaced", "bench").unwrap(),
@@ -392,10 +402,9 @@ impl DataSink for OtlpSink {
             }
             CollectorEvent::ResourceStatus(info) => {
                 let key = format!(
-                    "{}|resource_status|{}|{}",
+                    "{}|resource_status|{}",
                     context.endpoint_key,
-                    info.resource_type.as_str(),
-                    info.id
+                    info.resource_type.as_str()
                 );
                 (key, event.clone())
             }
@@ -414,7 +423,7 @@ impl DataSink for OtlpSink {
 /// The callback runs only when OpenTelemetry collects metrics. It reads an
 /// atomic depth snapshot without locking or scanning either queue. Weak
 /// references avoid extending a sink or queue lifetime solely for metrics.
-fn register_queue_depth_metric(sinks: &[OtlpSink]) {
+fn register_queue_depth_metric(meter: &Meter, sinks: &[OtlpSink]) {
     let queues = sinks
         .iter()
         .map(|sink| {
@@ -426,7 +435,7 @@ fn register_queue_depth_metric(sinks: &[OtlpSink]) {
         })
         .collect::<Vec<_>>();
 
-    opentelemetry::global::meter("carbide-health")
+    meter
         .u64_observable_gauge("carbide_health_otlp_queue_depth")
         .with_description("Number of entries waiting in an OTLP queue, by target and signal.")
         .with_callback(move |observer| {
@@ -463,6 +472,7 @@ mod tests {
 
     use carbide_instrument::testing::MetricsCapture;
     use mac_address::MacAddress;
+    use opentelemetry::metrics::MeterProvider as _;
 
     use super::*;
     use crate::otlp::collector_logs::logs_service_server::{LogsService, LogsServiceServer};
@@ -479,7 +489,7 @@ mod tests {
     use crate::sink::event_mapper::OpenBmcEventMapper;
     use crate::sink::{
         CompositeDataSink, DiagnosticLogRecord, LogRecord, LogSeverity, MetricSample,
-        MetricSemantics,
+        MetricSemantics, RedfishResourceType, ResourceStatusInfo, ResourceStatusReport,
     };
 
     fn test_context() -> EventContext {
@@ -759,6 +769,44 @@ mod tests {
     }
 
     #[test]
+    fn resource_status_types_queue_separately_and_reports_keep_the_latest() {
+        let sink = test_sink();
+        let context = test_context();
+        for resource_type in [RedfishResourceType::System, RedfishResourceType::Chassis] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+                    resource_type,
+                    resources: Vec::new(),
+                })),
+            );
+        }
+        assert_eq!(sink.queue.len(), 2);
+
+        let sink = test_sink();
+        for id in ["first", "second"] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+                    resource_type: RedfishResourceType::Firmware,
+                    resources: vec![ResourceStatusInfo {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        status: None,
+                    }],
+                })),
+            );
+        }
+
+        assert_eq!(sink.queue.len(), 1);
+        let (_, (_, event)) = sink.queue.pop().expect("latest resource-status report");
+        let CollectorEvent::ResourceStatus(report) = event else {
+            panic!("resource-status queue entry");
+        };
+        assert_eq!(report.resources[0].id, "second");
+    }
+
+    #[test]
     fn ordinary_log_occurrences_queue_separately_and_replays_replace() {
         let occurrence = |entry_id: &str| {
             let CollectorEvent::Log(mut record) = log_event(
@@ -798,11 +846,17 @@ mod tests {
 
     #[test]
     fn bounded_signal_queues_drop_oldest_and_report_depth() {
-        let metrics = MetricsCapture::start();
-        let sink = bounded_test_sink(1);
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("health-otlp-test", "carbide", false)
+                .expect("test metric provider should initialize");
+        let metrics = MetricsCapture::for_registry(&metrics_setup.registry);
+        let sink = OtlpSink {
+            instrumentation: metrics_setup.instrumentation.clone(),
+            ..bounded_test_sink(1)
+        };
         let context = test_context();
 
-        register_queue_depth_metric(std::slice::from_ref(&sink));
+        register_queue_depth_metric(&metrics_setup.meter, std::slice::from_ref(&sink));
 
         sink.handle_event(&context, &log_event("OpenBMC.0.1.First", "[]"));
         sink.handle_event(&context, &log_event("OpenBMC.0.1.Second", "[]"));
@@ -857,6 +911,83 @@ mod tests {
 
         assert_eq!(sink.queue.len(), 1);
         assert_eq!(sink.metrics_queue.len(), 1);
+    }
+
+    /// Identical target labels in separate service instances must describe
+    /// only that instance's queues, including empty queues.
+    #[tokio::test]
+    async fn new_many_keeps_queue_depth_isolated_by_meter() {
+        const METRIC: &str = "carbide_health_otlp_queue_depth";
+        const TARGET: &str = "http://shared.example:4317";
+
+        let setups = ["otlp-queue-first", "otlp-queue-second"].map(|name| {
+            metrics_endpoint::new_metrics_setup(name, "carbide", false)
+                .expect("test metric provider should initialize")
+        });
+        let captures = setups
+            .each_ref()
+            .map(|setup| MetricsCapture::for_registry(&setup.registry));
+        let configs = [OtlpTargetConfig {
+            endpoint: TARGET.to_string(),
+            batch_size: 512,
+            queue_capacity: 4,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
+            flush_interval: Duration::from_secs(3600),
+            include_diagnostics: false,
+            include_alert_details: false,
+            tls: None,
+        }];
+        let sinks = setups.each_ref().map(|setup| {
+            let manager =
+                MetricsManager::new("queue_depth_test").expect("metrics manager should initialize");
+            OtlpSink::new_many(
+                &configs,
+                Arc::new(OpenBmcEventMapper),
+                &manager,
+                "queue_depth_test",
+                &setup.meter,
+                &setup.instrumentation,
+            )
+            .expect("OTLP sinks should initialize")
+        });
+        let context = test_context();
+
+        // Do not yield: the current-thread runtime keeps the drains idle
+        // while this test fills and scrapes their queues.
+        for instance in &sinks {
+            instance[0].handle_event(&context, &log_event("OpenBMC.0.1.First", "[]"));
+        }
+        sinks[1][0].handle_event(&context, &log_event("OpenBMC.0.1.Second", "[]"));
+        sinks[1][0].handle_event(&context, &metric_event());
+
+        for (capture, logs, metrics) in [(&captures[0], 1.0, 0.0), (&captures[1], 2.0, 1.0)] {
+            let exposition = capture.render();
+            assert_eq!(
+                exposition
+                    .lines()
+                    .filter(|line| line.starts_with(&format!("{METRIC}{{")))
+                    .count(),
+                2,
+                "both signal series must be exported, including zero depth",
+            );
+            for (signal, expected) in [("logs", logs), ("metrics", metrics)] {
+                assert_eq!(
+                    capture.gauge_value(METRIC, &[("target", TARGET), ("signal", signal)]),
+                    expected,
+                    "{signal} depth must come from this instance's queues",
+                );
+            }
+        }
+
+        assert!(sinks[0][0].queue.pop().is_some());
+        for (capture, expected) in [(&captures[0], 0.0), (&captures[1], 2.0)] {
+            assert_eq!(
+                capture.gauge_value(METRIC, &[("target", TARGET), ("signal", "logs")]),
+                expected,
+                "draining one instance must not change another instance's depth",
+            );
+        }
     }
 
     #[test]
@@ -1234,7 +1365,10 @@ mod tests {
 
     #[tokio::test]
     async fn new_many_labels_replacement_counters_by_target() {
-        let capture = MetricsCapture::start();
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("health-otlp-test", "carbide", false)
+                .expect("test metric provider should initialize");
+        let capture = MetricsCapture::for_registry(&metrics_setup.registry);
 
         let configs = vec![
             OtlpTargetConfig {
@@ -1269,6 +1403,8 @@ mod tests {
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             "otlp_replacement_test",
+            &metrics_setup.meter,
+            &metrics_setup.instrumentation,
         )
         .expect("OTLP sinks should initialize");
 
@@ -1622,6 +1758,8 @@ mod tests {
         max_concurrent_exports: usize,
         flush_interval: std::time::Duration,
         name: &str,
+        meter: &Meter,
+        instrumentation: &Instrumentation,
     ) -> OtlpSink {
         let metrics_manager = MetricsManager::new(name).expect("metrics manager should initialize");
         OtlpSink::new_many(
@@ -1639,6 +1777,8 @@ mod tests {
             Arc::new(OpenBmcEventMapper),
             &metrics_manager,
             name,
+            meter,
+            instrumentation,
         )
         .expect("OTLP sink should initialize")
         .remove(0)
@@ -1657,7 +1797,10 @@ mod tests {
 
     #[tokio::test]
     async fn export_retry_resends_the_same_request() {
-        let capture = MetricsCapture::start();
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("health-otlp-test", "carbide", false)
+                .expect("test metric provider should initialize");
+        let capture = MetricsCapture::for_registry(&metrics_setup.registry);
 
         for partial_rejections in [None, Some(1)] {
             let collector = Arc::new(FlakyCollector {
@@ -1678,6 +1821,8 @@ mod tests {
                 OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                 std::time::Duration::from_secs(3600),
                 "otlp_retry_test",
+                &metrics_setup.meter,
+                &metrics_setup.instrumentation,
             );
 
             let context = test_context();
@@ -1809,14 +1954,20 @@ mod tests {
         use crate::otlp::metrics::metric;
         use crate::otlp::metrics::number_data_point::Value::AsDouble;
 
-        let capture = MetricsCapture::start();
+        let metrics_setup =
+            metrics_endpoint::new_metrics_setup("health-otlp-test", "carbide", false)
+                .expect("test metric provider should initialize");
+        let capture = MetricsCapture::for_registry(&metrics_setup.registry);
         let collector = Arc::new(FlakyCollector::default());
         let endpoint = serve_collector(
             tonic::transport::Server::builder()
                 .add_service(MetricsServiceServer::from_arc(collector.clone())),
         )
         .await;
-        let mut sink = bounded_test_sink(3);
+        let mut sink = OtlpSink {
+            instrumentation: metrics_setup.instrumentation.clone(),
+            ..bounded_test_sink(3)
+        };
         sink.target = ConfiguredOtlpTarget(endpoint.clone());
         let drain = OtlpMetricsDrainTask::new(
             sink.metrics_queue.clone(),
@@ -1832,6 +1983,7 @@ mod tests {
                 tls: None,
             },
             "staging".to_string(),
+            metrics_setup.instrumentation.clone(),
         )
         .run();
         tokio::pin!(drain);
@@ -1975,6 +2127,8 @@ mod tests {
             1,
             std::time::Duration::from_secs(3600),
             "otlp_backlog_test",
+            &opentelemetry::metrics::noop::NoopMeterProvider::new().meter("otlp-backlog-test"),
+            &Instrumentation::noop(),
         );
 
         push_metrics(&sink, 6);
@@ -2009,6 +2163,7 @@ mod tests {
                 tls: None,
             },
             "otlp_concurrency_test".to_string(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .run();
         tokio::pin!(drain);

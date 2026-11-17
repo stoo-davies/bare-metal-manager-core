@@ -3515,7 +3515,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate each NVLink Logical Partition
-	dbnvlic := []cdbm.NVLinkInterface{}
 	for _, nvlifc := range apiRequest.NVLinkInterfaces {
 		nvllpID := uuid.MustParse(nvlifc.NVLinkLogicalPartitionID)
 
@@ -3539,8 +3538,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID))
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID), nil)
 		}
-
-		dbnvlic = append(dbnvlic, cdbm.NVLinkInterface{NVLinkLogicalPartitionID: nvllp.ID, DeviceInstance: nvlifc.DeviceInstance})
 	}
 
 	// Validate NVLink interfaces if Instance Type has NVLink (GPU) Capability
@@ -5354,14 +5351,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	if machineIDs := qParams["machineId"]; len(machineIDs) != 0 {
 		cotel.SetAttribute(handlerSpan, attribute.StringSlice("machineId", machineIDs))
 		machineDAO := cdbm.NewMachineDAO(gaih.dbSession)
-		machines, _, err := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		existingMachineIDs, err := machineDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs})
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving machines from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve machines with IDs %v specified in query", strings.Join(machineIDs, ", ")), nil)
 		}
 		machineMap := map[string]bool{}
-		for _, machine := range machines {
-			machineMap[machine.ID] = true
+		for _, machineID := range existingMachineIDs {
+			machineMap[machineID] = true
 		}
 		hasValidMachineID := false
 		for _, machineID := range machineIDs {

@@ -164,6 +164,7 @@ async fn test_postingestion_bmc_upgrade(pool: sqlx::PgPool) -> CarbideResult<()>
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
 
     Box::pin(test_postingestion_bmc_upgrade_uefi(
@@ -523,6 +524,7 @@ async fn test_host_fw_upgrade_enabledisable_global_enabled(
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     update_manager.run_single_iteration().await?;
 
@@ -556,6 +558,7 @@ async fn test_host_fw_upgrade_enabledisable_global_disabled(
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     update_manager.run_single_iteration().await?;
 
@@ -747,6 +750,7 @@ async fn test_instance_upgrading_actual(
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
 
     // Single iteration now starts it
@@ -1477,6 +1481,7 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     // Update manager should notice that the host is underversioned, setting the request to update it
     update_manager.run_single_iteration().await.unwrap();
@@ -1575,6 +1580,7 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     // Update manager should notice that the host is underversioned, setting the request to update it
     update_manager.run_single_iteration().await.unwrap();
@@ -1777,6 +1783,7 @@ async fn test_artifact_download_failure_fails_upgrade(pool: sqlx::PgPool) -> Car
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     update_manager.run_single_iteration().await.unwrap();
 
@@ -1866,6 +1873,7 @@ async fn test_explicit_update(pool: sqlx::PgPool) -> CarbideResult<()> {
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
 
     // A tick of the state machine, but we don't start anything yet and it's still in ready
@@ -1977,6 +1985,7 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
         env.test_meter.meter(),
         env.api.work_lock_manager_handle.clone(),
         None,
+        env.api.instrumentation.clone(),
     );
     update_manager.run_single_iteration().await?;
 
@@ -2242,6 +2251,7 @@ async fn put_in_waiting_for_scout_upgrade(
             power_drains_needed,
             started_at: chrono::Utc::now(),
             deadline,
+            delivered_at: Some(chrono::Utc::now()),
             task_json: String::new(),
             result,
         },
@@ -2506,7 +2516,7 @@ async fn test_waiting_for_scout_upgrade_past_deadline_times_out(
     assert!(
         reason
             .as_deref()
-            .is_some_and(|r| r.starts_with("scout firmware upgrade timed out")),
+            .is_some_and(|r| r.starts_with("scout firmware upgrade completion report missing")),
         "unexpected reason: {reason:?}",
     );
 
