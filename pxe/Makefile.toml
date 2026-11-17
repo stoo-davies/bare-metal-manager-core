@@ -29,6 +29,10 @@ PKG_VERSION = { script = [
 ] } }
 FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_prodroot.pem" }
 
+# Compile diagnostics in, initially disabled. The embedded script enables them
+# for the boot-instruction fetch and disables them before downloading payloads.
+IPXE_DEBUG = "tcp:3:0,ipv4:3:0,arp:3:0,neighbour:3:0,retry:3:0,netdevice:1:0,nii:1:0,snp:1:0,snpnet:1:0,tls:1:0,httpconn:3:0,httpcore:3:0"
+
 # Where mkosi keeps downloaded distro packages. Without this mkosi re-downloads
 # the full package set on every build, which dominated the ephemeral image jobs
 # in CI. Purely a download cache -- mkosi still revalidates package metadata, so
@@ -737,6 +741,20 @@ script = '''
     fi
 '''
 
+[tasks.ipxe-patch-netdebug]
+category = "iPXE Kernel"
+description = "Patch iPXE to expose runtime network debug control"
+dependencies = ["ipxe-patch-http-ipv6-source"]
+cwd = "${REPO_ROOT}/pxe/ipxe/upstream"
+script = '''
+    IPXE_NETDEBUG_PATCH="${REPO_ROOT}/pxe/ipxe/local/0005-netdebug-command.patch"
+    if patch --batch --dry-run -p1 --reverse --forward -i "${IPXE_NETDEBUG_PATCH}" >/dev/null; then
+      echo "Network debug control patch is already applied"
+    else
+      patch --batch -p1 --forward -i "${IPXE_NETDEBUG_PATCH}"
+    fi
+'''
+
 [tasks.ipxe-install-efi-x86_64]
 category = "iPXE Kernel"
 description = "Copy the x86_64 EFI iPXE kernel to the boot controller static files directory"
@@ -779,7 +797,7 @@ dependencies = ["ipxe-build-efi-aarch64-ci"]
 [tasks.ipxe-build-efi-x86_64]
 category = "iPXE Kernel"
 description = "Build the x86_64 EFI iPXE kernel"
-dependencies = ["ipxe-patch-http-ipv6-source"]
+dependencies = ["ipxe-patch-netdebug"]
 script = '''
   LD_ARG=""
   if [ -n "${SA_ENABLEMENT}" ]; then
@@ -789,19 +807,19 @@ script = '''
     bin-x86_64-efi/snponly.efi \
     VERSION=${IPXE_BANNER_VERSION} \
     EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \
-    DEBUG=tls
+    DEBUG=${IPXE_DEBUG}
   make -j ${LD_ARG} \
     bin-x86_64-efi/golan.efi \
     VERSION=${IPXE_BANNER_VERSION} \
     EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \
-    DEBUG=tls
+    DEBUG=${IPXE_DEBUG}
 '''
 cwd = "ipxe/upstream/src"
 
 [tasks.ipxe-build-efi-aarch64]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
-dependencies = ["ipxe-patch-http-ipv6-source"]
+dependencies = ["ipxe-patch-netdebug"]
 script = '''
   if [ -n "${SA_ENABLEMENT}" ]; then
     docker run --rm -u $(id -u):$(id -g) \
@@ -814,7 +832,7 @@ script = '''
       bin-arm64-efi/snponly.efi \
       VERSION=${IPXE_BANNER_VERSION} \
       EMBED=/src/pxe/ipxe/local/embed.ipxe \
-      DEBUG=snp,tls \
+      DEBUG=${IPXE_DEBUG} \
       EXTRA_CFLAGS="-Wno-unused-parameter -Wno-unused-variable"
     docker run --rm -u $(id -u):$(id -g) \
     -v /etc/passwd:/etc/passwd:ro \
@@ -826,7 +844,7 @@ script = '''
       bin-arm64-efi/golan.efi \
       VERSION=${IPXE_BANNER_VERSION} \
       EMBED=/src/pxe/ipxe/local/embed.ipxe \
-      DEBUG=snp,tls \
+      DEBUG=${IPXE_DEBUG} \
       EXTRA_CFLAGS="-Wno-unused-parameter -Wno-unused-variable"
   else
     make -j \
@@ -834,13 +852,13 @@ script = '''
       bin-arm64-efi/snponly.efi \
       VERSION=${IPXE_BANNER_VERSION} \
       EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \
-      DEBUG=snp,tls
+      DEBUG=${IPXE_DEBUG}
     make -j \
       CROSS_COMPILE=aarch64-linux-gnu- \
       bin-arm64-efi/golan.efi \
       VERSION=${IPXE_BANNER_VERSION} \
       EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \
-      DEBUG=snp,tls
+      DEBUG=${IPXE_DEBUG}
   fi
 '''
 cwd = "ipxe/upstream/src"
@@ -848,14 +866,14 @@ cwd = "ipxe/upstream/src"
 [tasks.ipxe-build-efi-aarch64-ci]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
-dependencies = ["ipxe-patch-http-ipv6-source"]
+dependencies = ["ipxe-patch-netdebug"]
 command = "make"
 args = [
   "-j",
   "bin-arm64-efi/snponly.efi",
   "VERSION=${IPXE_BANNER_VERSION}",
   "EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe",
-  "DEBUG=snp,tls",
+  "DEBUG=${IPXE_DEBUG}",
 ]
 cwd = "ipxe/upstream/src"
 

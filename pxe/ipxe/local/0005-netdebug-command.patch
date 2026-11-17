@@ -1,0 +1,129 @@
+Runtime control of NICo network diagnostics
+
+Add netdebug on|off to toggle the compiled-in network debug masks. Weak
+references avoid pulling unused drivers into images that do not include them.
+The build selects maximum debug levels and starts with those levels disabled;
+the embedded script enables them only for the boot-instruction download.
+
+Apply after 0004-http-ipv6-source.patch.
+
+--- a/src/config/config.c
++++ b/src/config/config.c
+@@ -276,6 +276,9 @@
+ #ifdef NEIGHBOUR_CMD
+ REQUIRE_OBJECT ( neighbour_cmd );
+ #endif
++#ifdef NETDEBUG_CMD
++REQUIRE_OBJECT ( netdebug_cmd );
++#endif
+ #ifdef PING_CMD
+ REQUIRE_OBJECT ( ping_cmd );
+ #endif
+--- a/src/include/ipxe/errfile.h
++++ b/src/include/ipxe/errfile.h
+@@ -372,6 +372,7 @@
+ #define ERRFILE_linux_smbios	      ( ERRFILE_OTHER | 0x001a0000 )
+ #define ERRFILE_lotest		      ( ERRFILE_OTHER | 0x001b0000 )
+ #define ERRFILE_config_cmd	      ( ERRFILE_OTHER | 0x001c0000 )
++#define ERRFILE_netdebug_cmd           ( ERRFILE_OTHER | 0x006f0000 )
+ #define ERRFILE_ifmgmt_cmd	      ( ERRFILE_OTHER | 0x001d0000 )
+ #define ERRFILE_fcmgmt_cmd	      ( ERRFILE_OTHER | 0x001e0000 )
+ #define ERRFILE_gdbstub_cmd	      ( ERRFILE_OTHER | 0x001f0000 )
+--- /dev/null
++++ b/src/hci/commands/netdebug_cmd.c
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) 2026 NVIDIA CORPORATION & AFFILIATES.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or any later version.
++ *
++ * You can also choose to distribute this program under the terms of
++ * the Unmodified Binary Distribution Licence (as given in the file
++ * COPYING.UBDL), provided that you have satisfied its requirements.
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#include <stdio.h>
++#include <string.h>
++#include <errno.h>
++#include <getopt.h>
++#include <ipxe/command.h>
++#include <ipxe/parseopt.h>
++#include <ipxe/timer.h>
++
++/** @file
++ *
++ * Runtime control of compiled-in network debugging.
++ */
++
++/* Weak references leave unused protocols and firmware drivers unlinked. */
++#define NETDEBUG_DECLARE( object ) \
++	extern char __debug_disable(object) __attribute__ (( weak ))
++
++NETDEBUG_DECLARE ( tcp );
++NETDEBUG_DECLARE ( ipv4 );
++NETDEBUG_DECLARE ( arp );
++NETDEBUG_DECLARE ( neighbour );
++NETDEBUG_DECLARE ( retry );
++NETDEBUG_DECLARE ( netdevice );
++NETDEBUG_DECLARE ( nii );
++NETDEBUG_DECLARE ( snp );
++NETDEBUG_DECLARE ( snpnet );
++NETDEBUG_DECLARE ( tls );
++NETDEBUG_DECLARE ( httpconn );
++NETDEBUG_DECLARE ( httpcore );
++
++static char * const netdebug_masks[] = {
++	&__debug_disable(tcp),
++	&__debug_disable(ipv4),
++	&__debug_disable(arp),
++	&__debug_disable(neighbour),
++	&__debug_disable(retry),
++	&__debug_disable(netdevice),
++	&__debug_disable(nii),
++	&__debug_disable(snp),
++	&__debug_disable(snpnet),
++	&__debug_disable(tls),
++	&__debug_disable(httpconn),
++	&__debug_disable(httpcore),
++};
++
++struct netdebug_options {};
++static struct option_descriptor netdebug_opts[] = {};
++static struct command_descriptor netdebug_cmd =
++	COMMAND_DESC ( struct netdebug_options, netdebug_opts, 1, 1, "on|off" );
++
++static int netdebug_exec ( int argc, char **argv ) {
++	struct netdebug_options opts;
++	unsigned int i;
++	int enabled;
++	int rc;
++
++	if ( ( rc = parse_options ( argc, argv, &netdebug_cmd, &opts ) ) != 0 )
++		return rc;
++
++	if ( strcmp ( argv[optind], "on" ) == 0 ) {
++		enabled = 1;
++	} else if ( strcmp ( argv[optind], "off" ) == 0 ) {
++		enabled = 0;
++	} else {
++		printf ( "Expected netdebug on|off\n" );
++		return -EINVAL;
++	}
++
++	for ( i = 0 ; i < ( sizeof ( netdebug_masks ) /
++			   sizeof ( netdebug_masks[0] ) ) ; i++ ) {
++		if ( netdebug_masks[i] )
++			*netdebug_masks[i] = ( enabled ? 0 : ~0 );
++	}
++
++	printf ( "Network debugging %s at %ld ticks\n", argv[optind], currticks() );
++	return 0;
++}
++
++COMMAND ( netdebug, netdebug_exec );

@@ -8,6 +8,8 @@
 #define IMAGE_PNG             /* PNG image support */
 #define IMAGE_ZLIB            /* ZLIB image support */
 #define IPSTAT_CMD            /* IP statistics commands */
+#define NEIGHBOUR_CMD         /* Neighbour management commands */
+#define NETDEBUG_CMD          /* Runtime network debugging control */
 #define NET_PROTO_IPV6        /* IPv6 protocol */
 #define NSLOOKUP_CMD          /* DNS resolving command */
 #define NTP_CMD               /* NTP commands */
