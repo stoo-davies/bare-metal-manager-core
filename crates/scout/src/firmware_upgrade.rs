@@ -16,6 +16,7 @@
  */
 
 use std::ffi::OsString;
+use std::fmt::Write;
 use std::time::Duration;
 
 use carbide_instrument::Instrumentation;
@@ -364,7 +365,13 @@ async fn run_firmware_upgrade(
                 ),
                 reason => reason.to_string(),
             };
-            let cleanup = cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+            let mut cleanup = String::new();
+            for (index, error) in cleanup_errors.iter().enumerate() {
+                if index > 0 {
+                    cleanup.push_str("; ");
+                }
+                write!(cleanup, "{error}").expect("writing to a String cannot fail");
+            }
             let error = format!(
                 "{reason}; cleanup: {cleanup}; inputs retained at {}; hardware access remains blocked pending operator reconciliation; process termination does not establish that device-internal work stopped",
                 attempt.staging.work_dir().display(),
@@ -399,6 +406,7 @@ impl FirmwareUpgradeFixture {
     /// Use `LIBMLX_TEST_STATE_DIRECTORY` when scratch ancestors are shared.
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
 
         let root = match std::env::var_os("LIBMLX_TEST_STATE_DIRECTORY") {
             Some(parent) => tempfile::tempdir_in(parent),
@@ -410,9 +418,11 @@ impl FirmwareUpgradeFixture {
         let executable = std::env::current_exe().expect("locate Scout test executable");
         let helper = executable
             .parent()
-            .expect("test executable directory")
-            .parent()
-            .expect("Cargo target directory")
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has no fifth-level parent directory")
             .join("mlx-firmware-supervisor");
         assert!(
             helper.is_file(),
@@ -461,7 +471,7 @@ pub(super) async fn handle_firmware_upgrade_for_test(
         client,
         task,
         &fixture.config,
-        &carbide_instrument::Instrumentation::global(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await
 }
@@ -701,7 +711,7 @@ mod tests {
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         assert!(!result.success);
@@ -743,7 +753,7 @@ mod tests {
             let attempt = ScriptAttempt::acquire(
                 &fixture.config,
                 &task,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .unwrap();
             let inputs = attempt.staging.work_dir().to_path_buf();
@@ -806,7 +816,7 @@ printf 'mutation completed'
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         let inputs = std::path::PathBuf::from(result.stdout.lines().next().unwrap());
@@ -867,7 +877,7 @@ echo "upgrade complete"
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -946,7 +956,7 @@ echo "upgrade complete"
             &reqwest::Client::new(),
             &retry,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
         assert!(!result.success);
@@ -981,7 +991,7 @@ exit 42
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
         assert!(!result.success);
@@ -1020,7 +1030,7 @@ exit 42
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ))
         .await;
         let inputs = logs
@@ -1053,7 +1063,7 @@ exit 42
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
         assert!(result.success, "{}", result.error);
@@ -1089,7 +1099,7 @@ wait
             }
             let fixture = FirmwareUpgradeFixture::new();
             let client = reqwest::Client::new();
-            let instrumentation = Instrumentation::global();
+            let instrumentation = Instrumentation::noop();
             let mut execution = Box::pin(handle_firmware_upgrade(
                 &client,
                 &task,
@@ -1344,7 +1354,7 @@ test "$(cd "$DOWNLOAD_DIR" && pwd -P)" = "$PWD/downloads"
             &reqwest::Client::new(),
             &task,
             &fixture.config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
