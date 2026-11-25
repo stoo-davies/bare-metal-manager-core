@@ -7215,6 +7215,11 @@ message CloudInitInstructions {
   // alternate hostname or IP that they can resolve.
   optional string api_url_override = 4;
   optional string pxe_url_override = 5;
+  // MAC addresses of the host NICs behind the instance's physical
+  // interfaces, in instance interface order, without duplicates. Virtual
+  // functions are excluded. Empty when the API sends none; carbide-pxe
+  // then serves its name-based default network-config.
+  repeated string physical_interface_mac_addresses = 6;
 }
 
 // Specifies whether a network interface is physical network function (PF)

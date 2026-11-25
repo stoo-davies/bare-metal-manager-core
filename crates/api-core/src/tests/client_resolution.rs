@@ -669,6 +669,7 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
             cloud_init.discovery_instructions.is_some(),
             "Should get discovery instructions when machine is in PreAssignedMeasuring"
         );
+        assert!(cloud_init.physical_interface_mac_addresses.is_empty());
     }
 
     let stored_mac: Option<String> = sqlx::query_scalar(
@@ -752,6 +753,10 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
         assert!(
             cloud_init.discovery_instructions.is_none(),
             "tenant cloud-init must not render discovery instructions for the shared zero-DPU IP"
+        );
+        assert!(
+            cloud_init.physical_interface_mac_addresses.is_empty(),
+            "a legacy config without the HostInband MAC keeps carbide-pxe's name-based default"
         );
         assert_eq!(
             cloud_init
@@ -860,6 +865,11 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
         .expect("get_cloud_init_instructions returned an error")
         .into_inner();
 
+    assert_eq!(
+        cloud_init.physical_interface_mac_addresses,
+        [host_interfaces[&mh.host().id][0].mac_address.to_string()],
+        "the default network-config should DHCP the instance's HostInband NIC"
+    );
     let meta = cloud_init
         .metadata
         .expect("tenant cloud-init should include metadata");

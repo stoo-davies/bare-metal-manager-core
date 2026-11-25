@@ -35825,8 +35825,13 @@ type CloudInitInstructions struct {
 	// alternate hostname or IP that they can resolve.
 	ApiUrlOverride *string `protobuf:"bytes,4,opt,name=api_url_override,json=apiUrlOverride,proto3,oneof" json:"api_url_override,omitempty"`
 	PxeUrlOverride *string `protobuf:"bytes,5,opt,name=pxe_url_override,json=pxeUrlOverride,proto3,oneof" json:"pxe_url_override,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// MAC addresses of the host NICs behind the instance's physical
+	// interfaces, in instance interface order, without duplicates. Virtual
+	// functions are excluded. Empty when the API sends none; nico-pxe
+	// then serves its name-based default network-config.
+	PhysicalInterfaceMacAddresses []string `protobuf:"bytes,6,rep,name=physical_interface_mac_addresses,json=physicalInterfaceMacAddresses,proto3" json:"physical_interface_mac_addresses,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
 }
 
 func (x *CloudInitInstructions) Reset() {
@@ -35892,6 +35897,13 @@ func (x *CloudInitInstructions) GetPxeUrlOverride() string {
 		return *x.PxeUrlOverride
 	}
 	return ""
+}
+
+func (x *CloudInitInstructions) GetPhysicalInterfaceMacAddresses() []string {
+	if x != nil {
+		return x.PhysicalInterfaceMacAddresses
+	}
+	return nil
 }
 
 // What nico-dpu-agent reports. Will grow over time.
@@ -86406,13 +86418,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0elocal_hostname\x18\x04 \x01(\tH\x00R\rlocalHostname\x88\x01\x01B\x11\n" +
 	"\x0f_local_hostname\".\n" +
 	"\x1cCloudInitInstructionsRequest\x12\x0e\n" +
-	"\x02ip\x18\x01 \x01(\tR\x02ip\"\xac\x03\n" +
+	"\x02ip\x18\x01 \x01(\tR\x02ip\"\xf5\x03\n" +
 	"\x15CloudInitInstructions\x12/\n" +
 	"\x11custom_cloud_init\x18\x01 \x01(\tH\x00R\x0fcustomCloudInit\x88\x01\x01\x12a\n" +
 	"\x16discovery_instructions\x18\x02 \x01(\v2%.forge.CloudInitDiscoveryInstructionsH\x01R\x15discoveryInstructions\x88\x01\x01\x129\n" +
 	"\bmetadata\x18\x03 \x01(\v2\x18.forge.CloudInitMetaDataH\x02R\bmetadata\x88\x01\x01\x12-\n" +
 	"\x10api_url_override\x18\x04 \x01(\tH\x03R\x0eapiUrlOverride\x88\x01\x01\x12-\n" +
-	"\x10pxe_url_override\x18\x05 \x01(\tH\x04R\x0epxeUrlOverride\x88\x01\x01B\x14\n" +
+	"\x10pxe_url_override\x18\x05 \x01(\tH\x04R\x0epxeUrlOverride\x88\x01\x01\x12G\n" +
+	" physical_interface_mac_addresses\x18\x06 \x03(\tR\x1dphysicalInterfaceMacAddressesB\x14\n" +
 	"\x12_custom_cloud_initB\x19\n" +
 	"\x17_discovery_instructionsB\v\n" +
 	"\t_metadataB\x13\n" +

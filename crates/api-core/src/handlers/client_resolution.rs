@@ -23,8 +23,10 @@ use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use db::ObjectColumnFilter;
 use db::db_read::DbReader;
+use mac_address::MacAddress;
 use model::instance::config::network::{
-    DeviceLocator, InstanceNetworkConfig, InstanceNetworkConfigUpdate, InterfaceFunctionId,
+    DeviceLocator, InstanceInterfaceConfig, InstanceNetworkConfig, InstanceNetworkConfigUpdate,
+    InterfaceFunctionId,
 };
 use model::instance::config::tenant_config::HOSTNAME_RE;
 use model::instance::snapshot::InstanceSnapshot;
@@ -321,6 +323,105 @@ pub(super) async fn resolve_machine_interface(
     }
 }
 
+/// Returns the MACs of the host NICs behind the instance's physical interfaces
+/// for the default NoCloud network-config, in config order without duplicates.
+/// Database failures propagate. An interface that cannot be mapped to a host
+/// NIC yields an empty list, so carbide-pxe keeps its name-based default
+/// rather than failing the user-data and meta-data served by the same call.
+async fn instance_physical_interface_macs(
+    conn: &mut PgConnection,
+    instance: &InstanceSnapshot,
+    client_ip: IpAddr,
+) -> Result<Vec<String>, CarbideError> {
+    let interfaces = &instance.config.network.interfaces;
+    let host_interfaces =
+        db::machine_interface::find_by_machine_ids(&mut *conn, &[instance.machine_id])
+            .await?
+            .remove(&instance.machine_id)
+            .unwrap_or_default();
+    let dpu_ids_by_device = if interfaces.iter().any(|interface| {
+        interface.host_inband_mac_address.is_none() && interface.device_locator.is_some()
+    }) {
+        let host = db::machine::find_one(
+            &mut *conn,
+            &instance.machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .ok_or_else(|| {
+            CarbideError::internal(format!(
+                "host {} disappeared during client resolution",
+                instance.machine_id
+            ))
+        })?;
+        match host.get_dpu_device_and_id_mappings() {
+            Ok((_, dpu_ids_by_device)) => dpu_ids_by_device,
+            Err(error) => {
+                tracing::warn!(
+                    instance_id = %instance.id,
+                    %error,
+                    "cannot map instance interfaces to DPUs; omitting default network-config MACs"
+                );
+                return Ok(Vec::new());
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+
+    match physical_interface_macs(client_ip, interfaces, &host_interfaces, &dpu_ids_by_device) {
+        Ok(macs) => Ok(macs.iter().map(MacAddress::to_string).collect()),
+        Err(error) => {
+            tracing::warn!(
+                instance_id = %instance.id,
+                %error,
+                "cannot map instance interfaces to host NICs; omitting default network-config MACs"
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Maps each physical instance interface to its host NIC's MAC: the recorded
+/// MAC for host-inband interfaces, otherwise the host interface selected by
+/// [`select_instance_attachment`]. Virtual functions are skipped.
+fn physical_interface_macs(
+    client_ip: IpAddr,
+    interfaces: &[InstanceInterfaceConfig],
+    host_interfaces: &[MachineInterfaceSnapshot],
+    dpu_ids_by_device: &HashMap<String, Vec<DpuMachineId>>,
+) -> Result<Vec<MacAddress>, CarbideError> {
+    let mut macs = Vec::new();
+    for interface in interfaces {
+        let mac = if let Some(mac) = interface.host_inband_mac_address {
+            mac
+        } else if matches!(interface.function_id, InterfaceFunctionId::Physical {}) {
+            let attachment = InstanceAttachment {
+                function_id: &interface.function_id,
+                device_locator: interface.device_locator.as_ref(),
+            };
+            select_instance_attachment(
+                client_ip,
+                &HashSet::from([attachment]),
+                host_interfaces,
+                dpu_ids_by_device,
+            )?
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "client IP {client_ip} has no primary host interface for a physical instance interface"
+                ))
+            })?
+            .mac_address
+        } else {
+            continue;
+        };
+        if !macs.contains(&mac) {
+            macs.push(mac);
+        }
+    }
+    Ok(macs)
+}
+
 /// Returns the configured PF's host interface when retained descriptions agree.
 /// Conflicting descriptions or unresolved explicit placement fail. No matching
 /// config, agreeing VFs, or omitted placement without a primary return `None`
@@ -520,6 +621,8 @@ pub(super) async fn resolve_cloud_init_instructions(
                 );
                 None
             };
+            let physical_interface_mac_addresses =
+                instance_physical_interface_macs(&mut *conn, &instance, client_ip).await?;
 
             Ok(rpc::CloudInitInstructions {
                 custom_cloud_init: instance.config.os.user_data,
@@ -532,6 +635,7 @@ pub(super) async fn resolve_cloud_init_instructions(
                 }),
                 api_url_override: None,
                 pxe_url_override: None,
+                physical_interface_mac_addresses,
             })
         }
         ResolvedClient::MachineInterface(machine_interface) => {
@@ -637,6 +741,7 @@ pub(super) async fn resolve_cloud_init_instructions(
                 metadata,
                 api_url_override,
                 pxe_url_override,
+                physical_interface_mac_addresses: Vec::new(),
             })
         }
     }
@@ -647,7 +752,6 @@ mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
     use carbide_uuid::machine::MachineInterfaceId;
-    use mac_address::MacAddress;
     use model::test_support::machine_snapshot::{dpu_machine_id, host_machine_id};
 
     use super::*;
@@ -876,6 +980,70 @@ mod tests {
             }
             "omitted placement without primary preserves compatibility" {
                 (vec![implicit], vec![secondary]) => Yields(None),
+            }
+        );
+    }
+
+    #[test]
+    fn default_network_macs_follow_physical_interfaces() {
+        let host_interfaces = [host_interface(0), host_interface(1)];
+        let locator = |device_instance| DeviceLocator {
+            device: "BlueField".into(),
+            device_instance,
+        };
+        let dpu_ids_by_device = HashMap::from([(
+            locator(0).device,
+            vec![dpu_machine_id(0), dpu_machine_id(1)],
+        )]);
+        let segment = NetworkSegmentId::from(uuid::Uuid::from_u128(1));
+        let implicit_pf =
+            InstanceNetworkConfig::for_segment_ids(&[segment], &[], &[]).interfaces[0].clone();
+        let placed_pf = |device_instance| {
+            let mut interface = implicit_pf.clone();
+            interface.device_locator = Some(locator(device_instance));
+            interface
+        };
+        let mut vf = placed_pf(1);
+        vf.function_id = InterfaceFunctionId::Virtual { id: 1 };
+        let inband_mac = MacAddress::new([0x02, 0, 0, 0, 1, 0]);
+        let mut host_inband = implicit_pf.clone();
+        host_inband.host_inband_mac_address = Some(inband_mac);
+        let primary_mac = host_interfaces[0].mac_address;
+        let secondary_mac = host_interfaces[1].mac_address;
+
+        let macs = |interfaces: Vec<InstanceInterfaceConfig>| {
+            physical_interface_macs(
+                "192.0.2.10".parse().unwrap(),
+                &interfaces,
+                &host_interfaces,
+                &dpu_ids_by_device,
+            )
+            .map_err(|error| {
+                assert!(
+                    matches!(error, CarbideError::FailedPrecondition(_)),
+                    "{error:?}"
+                );
+            })
+        };
+
+        scenarios!(run = macs;
+            "omitted placement uses the primary interface" {
+                vec![implicit_pf.clone()] => Yields(vec![primary_mac]),
+            }
+            "placed PFs keep instance interface order" {
+                vec![placed_pf(1), placed_pf(0)] => Yields(vec![secondary_mac, primary_mac]),
+            }
+            "a host NIC named twice appears once" {
+                vec![implicit_pf.clone(), placed_pf(0)] => Yields(vec![primary_mac]),
+            }
+            "virtual functions are skipped" {
+                vec![vf, placed_pf(1)] => Yields(vec![secondary_mac]),
+            }
+            "host-inband interfaces use their recorded MAC" {
+                vec![host_inband] => Yields(vec![inband_mac]),
+            }
+            "unresolved placement fails" {
+                vec![placed_pf(2)] => Fails,
             }
         );
     }

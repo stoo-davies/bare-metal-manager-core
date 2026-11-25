@@ -267,12 +267,11 @@ fn extract_network_config(custom_cloud_init: &str) -> Option<String> {
     serde_yaml::to_string(network).ok()
 }
 
-/// Default network-config served when a tenant hasn't provided a custom
-/// `network:` key in their cloud-init userdata. cloud-init's own default
-/// behavior (no network-config at all) only DHCPs the first network
-/// interface it finds; this instead DHCPs every matching interface, under
-/// both the predictable ("en*") and legacy ("eth*") naming conventions,
-/// so multi-NIC hosts come up with working networking on every port.
+/// Fallback network-config for when carbide-api supplies no instance NIC
+/// MACs (an older API, or interfaces it could not map to host NICs). It DHCPs
+/// every interface under both the predictable ("en*") and legacy ("eth*")
+/// naming conventions, but only cloud-init's netplan renderer honors
+/// `match.name`; other renderers name profiles after the YAML keys.
 const DEFAULT_NETWORK_CONFIG: &str = r#"version: 2
 ethernets:
   predictable-names:
@@ -287,27 +286,50 @@ ethernets:
     dhcp6: true
 "#;
 
+/// Builds a network-config that DHCPs each of the instance's host NICs,
+/// matched by MAC, which every cloud-init renderer supports. Each key is the
+/// NIC's systemd MAC-based name (`enx` plus 12 hex digits): a valid,
+/// collision-free interface name if a renderer falls back to using the key as
+/// the device name. MACs are quoted so YAML 1.1 parsers cannot read an
+/// all-digit MAC as a sexagesimal integer.
+fn mac_network_config(mac_addresses: &[String]) -> String {
+    let mut config = String::from("version: 2\nethernets:\n");
+    for mac in mac_addresses {
+        let mac = mac.to_ascii_lowercase();
+        let name = mac.replace(':', "");
+        config.push_str(&format!(
+            "  enx{name}:\n    match:\n      macaddress: \"{mac}\"\n    dhcp4: true\n    dhcp6: true\n"
+        ));
+    }
+    config
+}
+
 /// Resolves the network-config YAML to use for a machine: the `network:`
 /// key extracted from the tenant's custom cloud-init userdata if present,
-/// otherwise DEFAULT_NETWORK_CONFIG (DHCP on every interface), rather
-/// than an empty document that would fall back to cloud-init's own
-/// first-interface-only default.
-fn resolve_network_config(custom_cloud_init: Option<&str>) -> Cow<'static, str> {
-    custom_cloud_init
-        .and_then(extract_network_config)
-        .map(Cow::Owned)
-        .unwrap_or(Cow::Borrowed(DEFAULT_NETWORK_CONFIG))
+/// otherwise DHCP on the instance's host NICs matched by MAC, otherwise
+/// DEFAULT_NETWORK_CONFIG. Serving a document rather than none avoids
+/// cloud-init's own first-interface-only fallback.
+fn resolve_network_config(
+    custom_cloud_init: Option<&str>,
+    mac_addresses: &[String],
+) -> Cow<'static, str> {
+    if let Some(network_config) = custom_cloud_init.and_then(extract_network_config) {
+        return Cow::Owned(network_config);
+    }
+    if mac_addresses.is_empty() {
+        Cow::Borrowed(DEFAULT_NETWORK_CONFIG)
+    } else {
+        Cow::Owned(mac_network_config(mac_addresses))
+    }
 }
 
 /// Serves NoCloud's `network-config` document for a tenant's assigned
-/// machine, extracted from any `network:` key present in their custom
-/// cloud-init userdata. When no such key is present, serves
-/// DEFAULT_NETWORK_CONFIG instead of an empty document, so hosts get
-/// DHCP on every interface by default rather than cloud-init's own
-/// first-interface-only behavior.
+/// machine, as chosen by [`resolve_network_config`].
 async fn network_config(machine: Machine, state: State<AppState>) -> impl IntoResponse {
-    let network_config_yaml =
-        resolve_network_config(machine.instructions.custom_cloud_init.as_deref());
+    let network_config_yaml = resolve_network_config(
+        machine.instructions.custom_cloud_init.as_deref(),
+        &machine.instructions.physical_interface_mac_addresses,
+    );
     let template_data = HashMap::from([("network_config", network_config_yaml)]);
     axum_template::Render("network-config", state.engine.clone(), template_data)
 }
@@ -731,51 +753,79 @@ mod tests {
 
     #[test]
     fn resolve_network_config_handles_various_inputs() {
+        const CUSTOM_NETWORK: &str = "#cloud-config\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n        - 10.10.10.50/24\n";
+        const NO_NETWORK: &str = "#cloud-config\nwrite_files: []\n";
+        const MACS: &[&str] = &["0C:42:A1:B2:C3:D4", "10:20:30:40:50:61"];
+        const MAC_CONFIG: &str = r#"version: 2
+ethernets:
+  enx0c42a1b2c3d4:
+    match:
+      macaddress: "0c:42:a1:b2:c3:d4"
+    dhcp4: true
+    dhcp6: true
+  enx102030405061:
+    match:
+      macaddress: "10:20:30:40:50:61"
+    dhcp4: true
+    dhcp6: true
+"#;
+
         struct Case {
             name: &'static str,
             custom_cloud_init: Option<&'static str>,
-            expect_default: bool,
+            mac_addresses: &'static [&'static str],
+            /// The exact document served, or `None` for the tenant's own block.
+            expected: Option<&'static str>,
         }
 
         let cases = [
             Case {
                 name: "no network key in custom cloud-init",
-                custom_cloud_init: Some("#cloud-config\nwrite_files: []\n"),
-                expect_default: true,
+                custom_cloud_init: Some(NO_NETWORK),
+                mac_addresses: &[],
+                expected: Some(DEFAULT_NETWORK_CONFIG),
             },
             Case {
                 name: "network key present in custom cloud-init",
-                custom_cloud_init: Some(
-                    "#cloud-config\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n        - 10.10.10.50/24\n",
-                ),
-                expect_default: false,
+                custom_cloud_init: Some(CUSTOM_NETWORK),
+                mac_addresses: &[],
+                expected: None,
             },
             Case {
                 name: "no custom cloud-init at all",
                 custom_cloud_init: None,
-                expect_default: true,
+                mac_addresses: &[],
+                expected: Some(DEFAULT_NETWORK_CONFIG),
+            },
+            Case {
+                name: "instance MACs replace the name-based default",
+                custom_cloud_init: Some(NO_NETWORK),
+                mac_addresses: MACS,
+                expected: Some(MAC_CONFIG),
+            },
+            Case {
+                name: "tenant network key wins over instance MACs",
+                custom_cloud_init: Some(CUSTOM_NETWORK),
+                mac_addresses: MACS,
+                expected: None,
             },
         ];
 
         for case in cases {
-            let result = resolve_network_config(case.custom_cloud_init);
+            let mac_addresses: Vec<String> = case
+                .mac_addresses
+                .iter()
+                .map(|mac| mac.to_string())
+                .collect();
+            let result = resolve_network_config(case.custom_cloud_init, &mac_addresses);
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap_or_else(|e| {
+                panic!("case '{}': result was not valid YAML: {}", case.name, e)
+            });
 
-            if case.expect_default {
-                assert_eq!(
-                    result, DEFAULT_NETWORK_CONFIG,
-                    "case '{}' failed",
-                    case.name
-                );
+            if let Some(expected) = case.expected {
+                // Exact bytes: the all-digit MAC must stay quoted for YAML 1.1.
+                assert_eq!(result, expected, "case '{}' failed", case.name);
             } else {
-                let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap_or_else(|e| {
-                    panic!("case '{}': result was not valid YAML: {}", case.name, e)
-                });
-                assert_eq!(
-                    parsed.get("version").unwrap().as_u64().unwrap(),
-                    2,
-                    "case '{}' failed",
-                    case.name
-                );
                 let eth0_addresses = parsed
                     .get("ethernets")
                     .and_then(|e| e.get("eth0"))
